@@ -29,7 +29,8 @@ setup(
             "sounddevice",
             "soundfile",
             "torch",
-            "transformers"
+            "transformers",
+            "speechbrain"
         ],
         "service": [
             "cltl.backend",
