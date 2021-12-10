@@ -8,9 +8,7 @@ def store_wav(frames, sampling_rate, save=None):
         audio = np.concatenate(frames)
     else:
         audio = frames
-
     if save:
-
         soundfile.write(save, audio, sampling_rate)
     else:
         sd.play(audio, sampling_rate)
