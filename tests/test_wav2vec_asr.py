@@ -10,6 +10,7 @@ from cltl.asr.wav2vec_asr import Wav2Vec2ASR
 class TestWav2Vec2ASR(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # cls.asr = Wav2Vec2ASR("jonatasgrosman/wav2vec2-large-xlsr-53-english", 16000)
         cls.asr = Wav2Vec2ASR("facebook/wav2vec2-base-960h", 16000)
 
     @classmethod

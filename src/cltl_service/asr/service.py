@@ -66,6 +66,11 @@ class AsrService:
     def _process(self, event: Event[VadMentionEvent]):
         payload = event.payload
         segment: Index = payload.mention.segment[0]
+
+        # Ignore empty audio
+        if segment.stop == segment.start:
+            return
+
         url = f"{STORAGE_SCHEME}:{Modality.AUDIO.name.lower()}/{segment.container_id}"
 
         with self._audio_loader(url, segment.start, segment.stop - segment.start) as source:
