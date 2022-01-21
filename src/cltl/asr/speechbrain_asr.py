@@ -1,11 +1,11 @@
 import os
 import shutil
 import tempfile
-import time
 
 import numpy as np
 from speechbrain.pretrained import EncoderDecoderASR
 
+from cltl.combot.infra.time_util import timestamp_now
 from cltl.asr.api import ASR
 from cltl.asr.util import store_wav
 
@@ -20,7 +20,7 @@ class SpeechbrainASR(ASR):
         shutil.rmtree(self._storage)
 
     def speech_to_text(self, audio: np.array, sampling_rate: int) -> str:
-        wav_file = str(os.path.join(self._storage, f"asr-{time.time()}.wav"))
+        wav_file = str(os.path.join(self._storage, f"asr-{timestamp_now()}.wav"))
         try:
             store_wav(audio, sampling_rate, wav_file)
 

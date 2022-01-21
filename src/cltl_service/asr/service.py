@@ -3,17 +3,17 @@ import uuid
 from typing import Callable
 
 import numpy as np
-import time
 from cltl.backend.api.storage import STORAGE_SCHEME
 from cltl.backend.source.client_source import ClientAudioSource
 from cltl.backend.spi.audio import AudioSource
 from cltl.combot.infra.config import ConfigurationManager
 from cltl.combot.infra.event import Event, EventBus
 from cltl.combot.infra.resource import ResourceManager
+from cltl.combot.infra.time_util import timestamp_now
 from cltl.combot.infra.topic_worker import TopicWorker
 from cltl_service.vad.schema import VadMentionEvent
-from emissor.representation.container import Index
-from emissor.representation.scenario import Modality
+from emissor.representation.container import Index, TemporalRuler
+from emissor.representation.scenario import Modality, TextSignal
 
 from cltl.asr.api import ASR
 from cltl_service.asr.schema import AsrTextSignalEvent
@@ -81,5 +81,8 @@ class AsrService:
 
     def _create_payload(self, transcript, payload):
         signal_id = str(uuid.uuid4())
+        # TODO add scenario_id, store to file?
+        signal = TextSignal(signal_id, Index.from_range(signal_id, 0, len(transcript)), list(transcript), Modality.TEXT,
+                            TemporalRuler(None, timestamp_now(), timestamp_now()), [], [], transcript)
 
-        return AsrTextSignalEvent.create(signal_id, time.time(), transcript, 1.0, payload.mention.segment)
+        return AsrTextSignalEvent.create(signal, 1.0, payload.mention.segment)

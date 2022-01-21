@@ -1,8 +1,7 @@
 import os
 
-import time
-
 import numpy as np
+from cltl.combot.infra.time_util import timestamp_now
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 
 from cltl.asr.api import ASR
@@ -24,7 +23,7 @@ class Wav2Vec2ASR(ASR):
 
         raw_audio = self._resample(audio, sampling_rate)
         if self._storage:
-            store_wav(raw_audio, sampling_rate, str(os.path.join(self._storage, f"asr-{time.time()}.wav")))
+            store_wav(raw_audio, sampling_rate, str(os.path.join(self._storage, f"asr-{timestamp_now()}.wav")))
 
         representation = self.processor(raw_audio, sampling_rate=self.sampling_rate, return_tensors="pt").input_values
         token_logits = self.model(representation).logits
