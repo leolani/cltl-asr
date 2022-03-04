@@ -65,7 +65,7 @@ class AsrService:
 
     def _process(self, event: Event[VadMentionEvent]):
         payload = event.payload
-        segment: Index = payload.mention.segment[0]
+        segment: Index = payload.mentions[0].segment[0]
 
         # Ignore empty audio
         if segment.stop == segment.start:
@@ -85,4 +85,4 @@ class AsrService:
         signal = TextSignal(signal_id, Index.from_range(signal_id, 0, len(transcript)), list(transcript), Modality.TEXT,
                             TemporalRuler(None, timestamp_now(), timestamp_now()), [], [], transcript)
 
-        return AsrTextSignalEvent.create(signal, 1.0, payload.mention.segment)
+        return AsrTextSignalEvent.create(signal, 1.0, payload.mentions[0].segment)
