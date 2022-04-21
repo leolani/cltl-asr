@@ -90,4 +90,4 @@ class AsrService:
         signal = TextSignal(signal_id, Index.from_range(signal_id, 0, len(transcript)), list(transcript), Modality.TEXT,
                             TemporalRuler(scenario_id, timestamp_now(), timestamp_now()), [], [], transcript)
 
-        return AsrTextSignalEvent.create(signal, 1.0, payload.mentions[0].segment)
+        return AsrTextSignalEvent.create_asr(signal, 1.0, payload.mentions[0].segment)
