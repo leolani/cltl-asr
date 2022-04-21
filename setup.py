@@ -33,7 +33,8 @@ setup(
             "speechbrain"
         ],
         "service": [
-            "cltl.backend",
+            "cltl.backend[impl]",
+            "cltl.emissor-data[client]",
             "cltl.combot",
             "cltl.vad",
             "emissor",

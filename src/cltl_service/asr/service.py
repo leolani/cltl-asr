@@ -11,6 +11,7 @@ from cltl.combot.infra.event import Event, EventBus
 from cltl.combot.infra.resource import ResourceManager
 from cltl.combot.infra.time_util import timestamp_now
 from cltl.combot.infra.topic_worker import TopicWorker
+from cltl_service.emissordata.client import EmissorDataClient
 from cltl_service.vad.schema import VadMentionEvent
 from emissor.representation.container import Index, TemporalRuler
 from emissor.representation.scenario import Modality, TextSignal
@@ -26,18 +27,21 @@ CONTENT_TYPE_SEPARATOR = ';'
 
 class AsrService:
     @classmethod
-    def from_config(cls, asr: ASR, event_bus: EventBus, resource_manager: ResourceManager,
-                    config_manager: ConfigurationManager):
+    def from_config(cls, asr: ASR, emissor_data: EmissorDataClient,
+                    event_bus: EventBus, resource_manager: ResourceManager, config_manager: ConfigurationManager):
         config = config_manager.get_config("cltl.asr")
 
         def audio_loader(url, offset, length) -> AudioSource:
             return ClientAudioSource.from_config(config_manager, url, offset, length)
 
-        return cls(config.get("vad_topic"), config.get("asr_topic"), asr, audio_loader, event_bus, resource_manager)
+        return cls(config.get("vad_topic"), config.get("asr_topic"), asr, emissor_data, audio_loader,
+                   event_bus, resource_manager)
 
-    def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, audio_loader: Callable[[str, int, int], AudioSource],
+    def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, emissor_data: EmissorDataClient,
+                 audio_loader: Callable[[str, int, int], AudioSource],
                  event_bus: EventBus, resource_manager: ResourceManager):
         self._asr = asr
+        self._emissor_data = emissor_data
         self._audio_loader = audio_loader
         self._event_bus = event_bus
         self._resource_manager = resource_manager
@@ -82,8 +86,8 @@ class AsrService:
 
     def _create_payload(self, transcript, payload):
         signal_id = str(uuid.uuid4())
-        # TODO add scenario_id, store to file?
+        scenario_id = self._emissor_data.get_scenario_for_id(payload.mentions[0].id)
         signal = TextSignal(signal_id, Index.from_range(signal_id, 0, len(transcript)), list(transcript), Modality.TEXT,
-                            TemporalRuler(None, timestamp_now(), timestamp_now()), [], [], transcript)
+                            TemporalRuler(scenario_id, timestamp_now(), timestamp_now()), [], [], transcript)
 
         return AsrTextSignalEvent.create(signal, 1.0, payload.mentions[0].segment)
