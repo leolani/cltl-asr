@@ -30,7 +30,8 @@ setup(
             "soundfile",
             "torch",
             "transformers",
-            "speechbrain"
+            "speechbrain",
+            "cltl.combot"
         ],
         "service": [
             "cltl.backend[impl]",
