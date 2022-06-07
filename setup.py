@@ -33,6 +33,11 @@ setup(
             "speechbrain",
             "cltl.combot"
         ],
+        "google": [
+            "sounddevice",
+            "soundfile",
+            "google-cloud-speech"
+        ],
         "service": [
             "cltl.backend[impl]",
             "cltl.emissor-data[client]",
