@@ -81,8 +81,9 @@ class AsrService:
         with self._audio_loader(url, segment.start, segment.stop - segment.start) as source:
             transcript = self._asr.speech_to_text(np.concatenate(tuple(source.audio)), source.rate)
 
-        asr_event = self._create_payload(transcript, payload)
-        self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
+        if transcript:
+            asr_event = self._create_payload(transcript, payload)
+            self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
 
     def _create_payload(self, transcript, payload):
         signal_id = str(uuid.uuid4())
