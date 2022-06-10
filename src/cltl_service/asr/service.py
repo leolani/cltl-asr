@@ -81,7 +81,7 @@ class AsrService:
         with self._audio_loader(url, segment.start, segment.stop - segment.start) as source:
             transcript = self._asr.speech_to_text(np.concatenate(tuple(source.audio)), source.rate)
 
-        if transcript:
+        if transcript and self._accept_transcript(transcript):
             asr_event = self._create_payload(transcript, payload)
             self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
 
@@ -92,3 +92,6 @@ class AsrService:
                             TemporalRuler(scenario_id, timestamp_now(), timestamp_now()), [], [], transcript)
 
         return AsrTextSignalEvent.create_asr(signal, 1.0, payload.mentions[0].segment)
+
+    def _accept_transcript(self, transcript):
+        return (len(transcript) > 1 or transcript.lower() in ['i'])
