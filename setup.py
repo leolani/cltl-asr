@@ -38,6 +38,11 @@ setup(
             "soundfile",
             "google-cloud-speech"
         ],
+        "whisper": [
+            "sounddevice",
+            "soundfile",
+            "openai-whisper"
+        ],
         "service": [
             "cltl.backend[impl]",
             "cltl.emissor-data[client]",
