@@ -19,7 +19,7 @@ setup(
     description='ASR for Leolani',
     long_description=long_description,
     long_description_content_type="text/markdown",
-    python_requires='>=3.7',
+    python_requires='>=3.9',
     install_requires=['numpy'],
     extras_require={
         "impl": [
@@ -42,6 +42,10 @@ setup(
             "sounddevice",
             "soundfile",
             "openai-whisper"
+        ],
+        "whispercpp": [
+            "sounddevice",
+            "soundfile",
         ],
         "service": [
             "cltl.backend[impl]",

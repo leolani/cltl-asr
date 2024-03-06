@@ -11,7 +11,7 @@ This package contains multiple implementations to convert text from spoken langu
 
 ### Prerequisites
 
-This repository uses Python >= 3.7
+This repository uses Python >= 3.9
 
 Be sure to run in a virtual python environment (e.g. conda, venv, mkvirtualenv, etc.)
 
@@ -23,9 +23,39 @@ Be sure to run in a virtual python environment (e.g. conda, venv, mkvirtualenv, 
     pip install -e .
     ```
 
+### Implementations
+
+There are various implementations included in `cltl.asr`. Depending on which
+implementation  is used different dependencies are required for this package.
+To include those during installation specify the required extra dependencies
+with pip, e.g. like:
+
+    pip install cltl.asr[whisper]
+
+For the available options refer to `setup.py`.
+
+#### Whisper ASR
+
+#### Whisper C++ ASR
+
+This implementation utilizes [whisper.cpp](https://github.com/ggerganov/whisper.cpp),
+which is a C++ implementation of whisper that can be run natively and provides
+improved performance over the Python implemenation of Whisper.
+
+In order to use this implementation a *whisper.cpp* server needs to be setup.
+To setup the server follow the instructions in the [whisper.cpp README](https://github.com/ggerganov/whisper.cpp)
+and [server specific README](https://github.com/ggerganov/whisper.cpp/tree/master/examples/server).
+
+For the server setup on OS X on an Apple Silicon device refer to this
+[setup script](support/setup_whisper_cpp.sh).
+
+#### Google ASR
+
+#### Speechbrain ASR
+
 ### Usage
 
-For using this repository as a package different project and on a different virtual environment, you may
+For using this repository as a package in a different project and on a different virtual environment, you may
 
 - install a published version from PyPI:
 
