@@ -47,6 +47,11 @@ setup(
             "sounddevice",
             "soundfile",
         ],
+        "whisperapi": [
+            "sounddevice",
+            "soundfile",
+            "openai",
+        ],
         "service": [
             "cltl.backend[impl]",
             "cltl.emissor-data[client]",
