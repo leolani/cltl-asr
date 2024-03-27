@@ -9,7 +9,7 @@ import requests
 from cltl.combot.infra.time_util import timestamp_now
 
 from cltl.asr.api import ASR
-from cltl.asr.util import store_wav
+from cltl.asr.util import store_wav, sanitize_whisper_result
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +40,16 @@ class WhisperCppASR(ASR):
                 }
                 response = requests.post(self._url, files=form)
                 if not response.ok:
+                    logger.error("Is the whisper.cpp server started? Check the support setup script for info!")
                     raise ValueError('Failed to transcribe audio for %s: %s (%s)', form, response.text, response.status_code)
 
             transcription = response.json()['text'].strip()
 
+            audio_duration = audio.shape[0] / sampling_rate
+            transcription = sanitize_whisper_result(audio_duration, transcription)
+
             logger.debug("Transcribed audio (%s sec) in %s to %s",
-                         audio.shape[0]/sampling_rate, time.time() - start, transcription)
+                         audio_duration, time.time() - start, transcription)
 
             return transcription
         finally:

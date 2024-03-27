@@ -6,6 +6,7 @@ import tempfile
 import numpy as np
 import time
 from cltl.combot.infra.time_util import timestamp_now
+from cltl.asr.util import sanitize_whisper_result
 from openai import OpenAI
 
 from cltl.asr.api import ASR
@@ -43,8 +44,11 @@ class WhisperApiASR(ASR):
 
             transcription = response.text.strip()
 
+            audio_duration = audio.shape[0] / sampling_rate
+            transcription = sanitize_whisper_result(audio_duration, transcription)
+
             logger.debug("Transcribed audio (%s sec) in %s to %s",
-                         audio.shape[0]/sampling_rate, time.time() - start, transcription)
+                         audio_duration, time.time() - start, transcription)
 
             return transcription
         finally:

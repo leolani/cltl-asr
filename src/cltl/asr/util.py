@@ -1,6 +1,10 @@
+import logging
+
 import numpy as np
 import soundfile
 import sounddevice as sd
+
+logger = logging.getLogger(__name__)
 
 
 def store_wav(frames, sampling_rate, save=None):
@@ -13,3 +17,11 @@ def store_wav(frames, sampling_rate, save=None):
     else:
         sd.play(audio, sampling_rate)
         sd.wait()
+
+
+def sanitize_whisper_result(audio_duration, transcription):
+    if ("TV GELDERLAND" in transcription) or (audio_duration < 1 and len(transcription) > 25):
+        logger.debug("Sanitized %s", transcription)
+        return ""
+
+    return transcription

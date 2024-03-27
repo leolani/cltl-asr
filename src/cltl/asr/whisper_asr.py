@@ -8,7 +8,7 @@ import whisper
 from cltl.combot.infra.time_util import timestamp_now
 
 from cltl.asr.api import ASR
-from cltl.asr.util import store_wav
+from cltl.asr.util import store_wav, sanitize_whisper_result
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +30,14 @@ class WhisperASR(ASR):
 
             start = time.time()
             transcription = self._model.transcribe(wav_file, fp16=False, language=self._language, task='transcribe')
-            logger.debug("Transcribed audio (%s sec) in %s", audio.shape[0]/sampling_rate, time.time() - start)
 
-            return transcription['text']
+            audio_duration = audio.shape[0] / sampling_rate
+            transcription_text = sanitize_whisper_result(audio_duration, transcription['text'])
+
+            logger.debug("Transcribed audio (%s sec) in %s to %s",
+                         audio_duration, time.time() - start, transcription)
+
+            return transcription_text
         finally:
             if self._clean_storage:
                 os.remove(wav_file)
