@@ -20,7 +20,7 @@ def store_wav(frames, sampling_rate, save=None):
 
 
 def sanitize_whisper_result(audio_duration, transcription):
-    if ("TV GELDERLAND" in transcription) or (audio_duration < 1 and len(transcription) > 25):
+    if ("TV GELDERLAND" in transcription) or transcription.startswith("*") or transcription.startswith("[") or transcription.startswith("(") or (audio_duration < 1 and len(transcription) > 25):
         logger.debug("Sanitized %s", transcription)
         return ""
 
