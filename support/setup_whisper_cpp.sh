@@ -26,5 +26,5 @@ pip install coremltools
 deactivte
 
 
-### Run the serveer ###
+### Run the server ###
 ./server --port 8989 -m models/ggml-medium.bin
