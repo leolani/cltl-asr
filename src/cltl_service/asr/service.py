@@ -70,10 +70,15 @@ class AsrService:
 
     def _process(self, event: Event[VadMentionEvent]):
         payload = event.payload
-        segment: Index = payload.mentions[0].segment[0]
+        # Ignore empty audio
+        if not payload.mentions or not payload.mentions[0].segment:
+            logger.info("No speech recognized in event %s", event.id)
+            return
 
+        segment: Index = payload.mentions[0].segment[0]
         # Ignore empty audio
         if segment.stop == segment.start:
+            logger.info("No speech recognized in event %s", event.id)
             return
 
         url = f"{STORAGE_SCHEME}:{Modality.AUDIO.name.lower()}/{segment.container_id}"
@@ -83,6 +88,7 @@ class AsrService:
 
         asr_event = self._create_payload(transcript if self._accept_transcript(transcript) else "", payload)
         self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
+        logger.info("Transcribed event %s to %s", event.id, transcript)
 
     def _create_payload(self, transcript, payload):
         signal_id = str(uuid.uuid4())
