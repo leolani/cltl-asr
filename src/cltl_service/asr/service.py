@@ -30,15 +30,16 @@ class AsrService:
     def from_config(cls, asr: ASR, emissor_data: EmissorDataClient,
                     event_bus: EventBus, resource_manager: ResourceManager, config_manager: ConfigurationManager):
         config = config_manager.get_config("cltl.asr")
+        gap_timeout = config.get_int("gap_timeout") / 1000 if "gap_timeout" in config else 0
 
         def audio_loader(url, offset, length) -> AudioSource:
             return ClientAudioSource.from_config(config_manager, url, offset, length)
 
-        return cls(config.get("vad_topic"), config.get("asr_topic"), asr, emissor_data, audio_loader,
-                   event_bus, resource_manager)
+        return cls(config.get("vad_topic"), config.get("asr_topic"), asr, gap_timeout,
+                   emissor_data, audio_loader, event_bus, resource_manager)
 
-    def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, emissor_data: EmissorDataClient,
-                 audio_loader: Callable[[str, int, int], AudioSource],
+    def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, gap_timeout: float,
+                 emissor_data: EmissorDataClient, audio_loader: Callable[[str, int, int], AudioSource],
                  event_bus: EventBus, resource_manager: ResourceManager):
         self._asr = asr
         self._emissor_data = emissor_data
@@ -47,6 +48,10 @@ class AsrService:
         self._resource_manager = resource_manager
         self._vad_topic = vad_topic
         self._asr_topic = asr_topic
+
+        self._gap_timeout = gap_timeout
+        self._transcript = []
+        self._mentions_transcript = []
 
         self._topic_worker = None
 
@@ -57,7 +62,8 @@ class AsrService:
     def start(self, timeout=30):
         self._topic_worker = TopicWorker([self._vad_topic], self._event_bus, provides=[self._asr_topic],
                                          resource_manager=self._resource_manager, processor=self._process,
-                                         buffer_size=0, name=self.__class__.__name__)
+                                         buffer_size=0, name=self.__class__.__name__,
+                                         interval=self._gap_timeout)
         self._topic_worker.start().wait()
 
     def stop(self):
@@ -69,34 +75,56 @@ class AsrService:
         self._topic_worker = None
 
     def _process(self, event: Event[VadMentionEvent]):
+        transcript = None
+        if event is not None:
+            transcript = self._transcribe(event)
+            if transcript:
+                self._transcript.append(transcript)
+                self._mentions_transcript.append(event.payload.mentions[0])
+
+        if not self._transcript or not transcript:
+            pass
+        elif self._gap_timeout and event is not None and self._transcript[-1].endswith(ASR.GAP_INDICATOR):
+            logger.debug("Partially transcribed event %s to %s", event.id, self._transcript[-1])
+        else:
+            # Full utterance or gap timeout reached
+            asr_event = self._create_payload()
+            self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
+            logger.info("Transcribed event %s to %s", event.id, self._transcript)
+
+            self._transcript = None
+            self._mentions_transcript = []
+
+    def _transcribe(self, event: Event[VadMentionEvent]):
         payload = event.payload
         # Ignore empty audio
         if not payload.mentions or not payload.mentions[0].segment:
             logger.info("No speech recognized in event %s", event.id)
-            return
+            return ""
 
         segment: Index = payload.mentions[0].segment[0]
         # Ignore empty audio
         if segment.stop == segment.start:
             logger.info("No speech recognized in event %s", event.id)
-            return
+            return ""
 
         url = f"{STORAGE_SCHEME}:{Modality.AUDIO.name.lower()}/{segment.container_id}"
 
         with self._audio_loader(url, segment.start, segment.stop - segment.start) as source:
-            transcript = self._asr.speech_to_text(np.concatenate(tuple(source.audio)), source.rate)
+            return self._asr.speech_to_text(np.concatenate(tuple(source.audio)), source.rate)
 
-        asr_event = self._create_payload(transcript if self._accept_transcript(transcript) else "", payload)
-        self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
-        logger.info("Transcribed event %s to %s", event.id, transcript)
-
-    def _create_payload(self, transcript, payload):
+    def _create_payload(self):
+        scenario_id = self._emissor_data.get_scenario_for_id(self._mentions_transcript[0].id)
         signal_id = str(uuid.uuid4())
-        scenario_id = self._emissor_data.get_scenario_for_id(payload.mentions[0].id)
+        transcript = " ".join(self._strip(part) for part in self._transcript)
+        segments = [segment for mention in self._mentions_transcript for segment in mention.segment]
+
         signal = TextSignal(signal_id, Index.from_range(signal_id, 0, len(transcript)), list(transcript), Modality.TEXT,
                             TemporalRuler(scenario_id, timestamp_now(), timestamp_now()), [], [], transcript)
 
-        return AsrTextSignalEvent.create_asr(signal, 1.0, payload.mentions[0].segment)
+        return AsrTextSignalEvent.create_asr(signal, 1.0, segments)
 
-    def _accept_transcript(self, transcript):
-        return transcript and (len(transcript) > 1 or transcript.lower() in ['i'])
+    def _strip(self, text):
+        text = text[:-len(ASR.GAP_INDICATOR)] if text.endswith(ASR.GAP_INDICATOR) else text
+
+        return text.strip()

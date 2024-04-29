@@ -4,6 +4,8 @@ import numpy as np
 
 
 class ASR(abc.ABC):
+    GAP_INDICATOR = '...'
+
     def speech_to_text(self, audio: np.ndarray, sampling_rate: int) -> str:
         """
         Transcribe the provided audio sample to text.
@@ -25,6 +27,8 @@ class ASR(abc.ABC):
         Returns
         -------
         str
-            Text transcript of the audio input.
+            Text transcript of the audio input. If the returned string ends in
+            ASR.GAP_INDICATOR this indicates that the returned string is a parital
+            transcription of an uttereance.
         """
         raise NotImplementedError()
