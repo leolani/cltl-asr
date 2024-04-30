@@ -32,12 +32,12 @@ class WhisperASR(ASR):
             transcription = self._model.transcribe(wav_file, fp16=False, language=self._language, task='transcribe')
 
             audio_duration = audio.shape[0] / sampling_rate
-            transcription_text = sanitize_whisper_result(audio_duration, transcription['text'])
+            transcription = sanitize_whisper_result(audio_duration, transcription['text'])
 
             logger.debug("Transcribed audio (%s sec) in %s to %s",
                          audio_duration, time.time() - start, transcription)
 
-            return transcription_text
+            return transcription
         finally:
             if self._clean_storage:
                 os.remove(wav_file)

@@ -20,8 +20,15 @@ def store_wav(frames, sampling_rate, save=None):
         sd.wait()
 
 
-def sanitize_whisper_result(audio_duration, transcription: str):
-    if ((audio_duration < 1 and len(transcription) > 25)
+def sanitize_whisper_result(audio_duration: float, transcription: str):
+    # * 6 syllables per sec * 6 letters per syllable (which should be very fast)
+    #   Set a minimum audio duration to avoid edge cases
+    #   https: // en.wikipedia.org / wiki / Speech_tempo
+    # * Remove subtitle related transcript errors
+    # * Remove meta-information related transcript errors
+    # * Remove background music
+    if ((audio_duration <= 1 and len(transcription) > 30)
+            or (audio_duration > 1 and len(transcription) > 6 * 5 * audio_duration)
             or "TV GELDERLAND" in transcription.upper()
             or "ondertitel" in transcription.lower()
             or transcription.startswith("*") or transcription.startswith("[") or transcription.startswith("(")

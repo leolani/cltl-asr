@@ -90,9 +90,10 @@ class AsrService:
             # Full utterance or gap timeout reached
             asr_event = self._create_payload()
             self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
-            logger.info("Transcribed event %s to %s", event.id, self._transcript)
+            logger.info("Transcribed event %s to %s %s", event.id, asr_event.signal.text,
+                        f"({self._transcript})" if len(self._transcript) > 1 else "")
 
-            self._transcript = None
+            self._transcript = []
             self._mentions_transcript = []
 
     def _transcribe(self, event: Event[VadMentionEvent]):
@@ -125,6 +126,7 @@ class AsrService:
         return AsrTextSignalEvent.create_asr(signal, 1.0, segments)
 
     def _strip(self, text):
+        text = text[len(ASR.GAP_INDICATOR):] if text.startswith(ASR.GAP_INDICATOR) else text
         text = text[:-len(ASR.GAP_INDICATOR)] if text.endswith(ASR.GAP_INDICATOR) else text
 
         return text.strip()
