@@ -30,17 +30,47 @@ class AsrService:
     def from_config(cls, asr: ASR, emissor_data: EmissorDataClient,
                     event_bus: EventBus, resource_manager: ResourceManager, config_manager: ConfigurationManager):
         config = config_manager.get_config("cltl.asr")
+        buffer = config.get_int("buffer") if "buffer" in config else 0
         gap_timeout = config.get_int("gap_timeout") / 1000 if "gap_timeout" in config else 0
 
         def audio_loader(url, offset, length) -> AudioSource:
             return ClientAudioSource.from_config(config_manager, url, offset, length)
 
-        return cls(config.get("vad_topic"), config.get("asr_topic"), asr, gap_timeout,
+        return cls(config.get("vad_topic"), config.get("asr_topic"), asr, gap_timeout, buffer,
                    emissor_data, audio_loader, event_bus, resource_manager)
 
-    def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, gap_timeout: float,
+    def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, gap_timeout: float, buffer: int,
                  emissor_data: EmissorDataClient, audio_loader: Callable[[str, int, int], AudioSource],
                  event_bus: EventBus, resource_manager: ResourceManager):
+        """
+        Service to create TextSignals from voice activity detections.
+
+        Parameters
+        ----------
+        vad_topic: str
+            Input topic for voice activity events
+        asr_topic: str
+            Output topic for text signal events
+        asr: ASR
+            ASR implementation
+        gap_timeout: float
+            Allow merging of voice activity events if the contiunation of an utterance by the speaker is expected
+            by :py:class:`~cltl.asr.api.ASR`. This is signaled by the transcript ending in
+            :py:const:`~cltl.asr.api.ASR.GAP_INDICATOR`. If set to 0, continuation signals will be ignored.
+        buffer: int
+            Number of events buffered during event processing. If set to 0, events that arrive during processing of will
+            be dropped. Note: if a positive gap_timeout is used and buffer is set to 0, internally still a buffer will
+            be created to ensure continuation events are not lost. Content of this buffer will be dropped if currently
+            no continuation is expected and subsequent invocations of the process method are instantaneous.
+        emissor_data: EmissorDataClient
+            client to retrieve emissor data
+        audio_loader: Callable[[str, int, int], AudioSource]
+            Callable that provides an AudioSource to access raw audio referenced in VAD events
+        event_bus: EventBus
+            Event bus of the application
+        resource_manager: ResourceManager
+            ResourceManager of the application
+        """
         self._asr = asr
         self._emissor_data = emissor_data
         self._audio_loader = audio_loader
@@ -50,6 +80,7 @@ class AsrService:
         self._asr_topic = asr_topic
 
         self._gap_timeout = gap_timeout
+        self._buffer = buffer
         self._transcript = []
         self._mentions_transcript = []
 
@@ -62,9 +93,11 @@ class AsrService:
         return None
 
     def start(self, timeout=30):
+        # If gap_timeout is configured, still add a buffer to catch continuation events
+        buffer_size = self._buffer if self._gap_timeout == 0 else max(self._buffer, 4)
         self._topic_worker = TopicWorker([self._vad_topic], self._event_bus, provides=[self._asr_topic],
                                          resource_manager=self._resource_manager, processor=self._process,
-                                         buffer_size=1, name=self.__class__.__name__,
+                                         buffer_size=buffer_size, name=self.__class__.__name__,
                                          interval=self._gap_timeout)
         self._topic_worker.start().wait()
 
@@ -77,23 +110,31 @@ class AsrService:
         self._topic_worker = None
 
     def _process(self, event: Event[VadMentionEvent]):
-        event_buffered_during_execution = timestamp_now() - self._last_event < 10
-        if event_buffered_during_execution and not self._transcript:
-            return
+        if self._gap_timeout > 0 and self._buffer == 0:
+            # Manually drop events that arrived during processing, but only if we don't expect continuation
+            # We consider 10ms as instantaneous invocation
+            event_buffered_during_execution = timestamp_now() - self._last_event < 10
+            if event_buffered_during_execution and not self._transcript:
+                self._last_event = timestamp_now()
+                return
 
         transcript = None
         if event is not None:
             transcript = self._transcribe(event)
+            self._mentions_transcript.append(event.payload.mentions[0])
             if transcript:
                 self._transcript.append(transcript)
-                self._mentions_transcript.append(event.payload.mentions[0])
 
-        if (event is None and not self._transcript) or (self._transcript and transcript == ""):
+        if (event is None and not self._transcript) or (event is not None and transcript is None):
+            # Ignore scheduled invocations if there is no transcript waiting for continuation and empty VAD detections
             pass
+        elif self._transcript and transcript == "":
+            logger.debug("Ignore empty transcript while waiting for continuation of %s (%s)", self._transcript[-1], event.id)
         elif self._gap_timeout and event is not None and self._transcript and self._transcript[-1].endswith(ASR.GAP_INDICATOR):
+            # Ignore empty transcripts while waiting for continuation
             logger.debug("Partially transcribed event %s to %s", event.id, self._transcript[-1])
         else:
-            # Full utterance or gap timeout reached
+            # Full (potentially empty) utterance or gap timeout reached
             asr_event = self._create_payload()
             self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
             logger.info("Transcribed event %s to %s %s", event.id, asr_event.signal.text,
@@ -106,16 +147,16 @@ class AsrService:
 
     def _transcribe(self, event: Event[VadMentionEvent]):
         payload = event.payload
-        # Ignore empty audio
+        # Ignore empty VAD events
         if not payload.mentions or not payload.mentions[0].segment:
             logger.info("No speech recognized in event %s", event.id)
-            return ""
+            return None
 
         segment: Index = payload.mentions[0].segment[0]
         # Ignore empty audio
         if segment.stop == segment.start:
             logger.info("No speech recognized in event %s", event.id)
-            return ""
+            return None
 
         url = f"{STORAGE_SCHEME}:{Modality.AUDIO.name.lower()}/{segment.container_id}"
 
