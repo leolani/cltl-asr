@@ -53,6 +53,8 @@ class AsrService:
         self._transcript = []
         self._mentions_transcript = []
 
+        self._last_event = timestamp_now()
+
         self._topic_worker = None
 
     @property
@@ -62,7 +64,7 @@ class AsrService:
     def start(self, timeout=30):
         self._topic_worker = TopicWorker([self._vad_topic], self._event_bus, provides=[self._asr_topic],
                                          resource_manager=self._resource_manager, processor=self._process,
-                                         buffer_size=0, name=self.__class__.__name__,
+                                         buffer_size=1, name=self.__class__.__name__,
                                          interval=self._gap_timeout)
         self._topic_worker.start().wait()
 
@@ -75,6 +77,10 @@ class AsrService:
         self._topic_worker = None
 
     def _process(self, event: Event[VadMentionEvent]):
+        event_buffered_during_execution = timestamp_now() - self._last_event < 10
+        if event_buffered_during_execution and not self._transcript:
+            return
+
         transcript = None
         if event is not None:
             transcript = self._transcribe(event)
@@ -82,9 +88,9 @@ class AsrService:
                 self._transcript.append(transcript)
                 self._mentions_transcript.append(event.payload.mentions[0])
 
-        if not self._transcript or not transcript:
+        if (event is None and not self._transcript) or (self._transcript and transcript == ""):
             pass
-        elif self._gap_timeout and event is not None and self._transcript[-1].endswith(ASR.GAP_INDICATOR):
+        elif self._gap_timeout and event is not None and self._transcript and self._transcript[-1].endswith(ASR.GAP_INDICATOR):
             logger.debug("Partially transcribed event %s to %s", event.id, self._transcript[-1])
         else:
             # Full utterance or gap timeout reached
@@ -95,6 +101,8 @@ class AsrService:
 
             self._transcript = []
             self._mentions_transcript = []
+
+        self._last_event = timestamp_now()
 
     def _transcribe(self, event: Event[VadMentionEvent]):
         payload = event.payload
