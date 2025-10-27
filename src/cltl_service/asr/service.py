@@ -136,7 +136,7 @@ class AsrService:
         else:
             # Full (potentially empty) utterance or gap timeout reached
             asr_event = self._create_payload()
-            self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event))
+            self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event, source=event))
             logger.info("Transcribed event %s to %s %s", event.id, asr_event.signal.text,
                         f"({self._transcript})" if len(self._transcript) > 1 else "")
 
