@@ -55,6 +55,10 @@ class LocalParakeetRNNTStreamer:
                 "Use this class with Parakeet TDT / RNNT style checkpoints."
             )
 
+        if device.startswith("cpu"):
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+
         self.model = model.eval().to(self.device)
         self.model.freeze()
         self.model.to(self.compute_dtype)
@@ -184,12 +188,10 @@ class LocalParakeetRNNTStreamer:
             is_last_chunk_batch=is_last_chunk_batch,
         )
 
-        start = time.time()
         encoder_output, encoder_output_len = self.model(
             input_signal=self.buffer.samples,
             input_signal_length=self.buffer.context_size_batch.total(),
         )
-        print("encoder_output timeing", time.time() - start)
 
         # NeMo example converts [B, C, T] -> [B, T, C]
         encoder_output = encoder_output.transpose(1, 2)

@@ -9,9 +9,9 @@ streamer = LocalParakeetRNNTStreamer(
     model_name="nvidia/parakeet-tdt-0.6b-v3",
     device="cpu",
     compute_dtype=torch.float32,
-    chunk_secs=0.1,
-    left_context_secs=0.1,
-    right_context_secs=0.1,
+    chunk_secs=2,
+    left_context_secs=5,
+    right_context_secs=2,
 )
 
 audio, sr = sf.read("resources/mic_sample2.wav", dtype="float32")
@@ -26,8 +26,9 @@ packet = int(0.1 * sr)
 
 start = time.time()
 for i in range(0, len(audio), packet):
+    start_loop = time.time()
     for result in streamer.push_audio(audio[i : i + packet]):
-        print("PARTIAL:", result.text, round(i / sr, 2), round(time.time() - start, 2))
+        print("PARTIAL:", result.text, round(i / sr, 2), round(time.time() - start, 2), round(time.time() - start_loop, 2))
 
 final_result = streamer.finish()
 print("FINAL:", final_result.text)
