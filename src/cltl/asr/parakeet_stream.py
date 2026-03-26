@@ -12,6 +12,9 @@ from nemo.collections.asr.parts.utils.rnnt_utils import BatchedHyps
 from nemo.collections.asr.parts.utils.streaming_utils import ContextSize, StreamingBatchedAudioBuffer
 
 
+import torch
+
+
 def make_divisible_by(num: int, factor: int) -> int:
     return (num // factor) * factor
 
@@ -142,6 +145,30 @@ class LocalParakeetRNNTStreamer:
 
         return audio
 
+    def profile_encoder_once(self, samples, lengths):
+        with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU],
+                record_shapes=True,
+                with_stack=False,
+                profile_memory=False,
+        ) as prof:
+            with torch.inference_mode():
+                processed_signal, processed_signal_len = self.model.preprocessor(
+                    input_signal=samples,
+                    length=lengths,
+                )
+                encoder_output, encoder_output_len = self.model.encoder(
+                    audio_signal=processed_signal,
+                    length=processed_signal_len,
+                )
+
+        print(
+            prof.key_averages().table(
+                sort_by="self_cpu_time_total",
+                row_limit=30,
+            )
+        )
+
     def _decode_text(self) -> str:
         if self.current_batched_hyps is None:
             return ""
@@ -177,19 +204,46 @@ class LocalParakeetRNNTStreamer:
         audio_lengths = torch.tensor([new_audio.numel()], dtype=torch.long, device=self.device)
         is_last_chunk_batch = torch.tensor([is_final], dtype=torch.bool, device=self.device)
 
+        from time import perf_counter
+
+        t0 = perf_counter()
+
         self.buffer.add_audio_batch_(
             audio_batch=audio_batch,
             audio_lengths=audio_lengths,
             is_last_chunk=is_final,
             is_last_chunk_batch=is_last_chunk_batch,
         )
+        t1 = perf_counter()
 
-        start = time.time()
-        encoder_output, encoder_output_len = self.model(
-            input_signal=self.buffer.samples,
-            input_signal_length=self.buffer.context_size_batch.total(),
+        samples = self.buffer.samples
+        lengths = self.buffer.context_size_batch.total()
+
+        processed_signal, processed_signal_len = self.model.preprocessor(
+            input_signal=samples,
+            length=lengths,
         )
-        print("encoder_output timeing", time.time() - start)
+        t2 = perf_counter()
+
+        encoder_output, encoder_output_len = self.model.encoder(
+            audio_signal=processed_signal,
+            length=processed_signal_len,
+        )
+        t3 = perf_counter()
+
+        print(
+            f"buf={samples.shape[1] / self.sample_rate:6.2f}s "
+            f"(L/C/R={self.context_samples.left / self.sample_rate:.2f}/"
+            f"{self.context_samples.chunk / self.sample_rate:.2f}/"
+            f"{self.context_samples.right / self.sample_rate:.2f}s) | "
+            f"in_len={int(lengths[0].item()):7d} smp | "
+            f"feat_len={int(processed_signal_len[0].item()):5d} frm | "
+            f"enc_len={int(encoder_output_len[0].item()):5d} frm | "
+            f"buffer={t1 - t0:6.3f}s preproc={t2 - t1:6.3f}s encoder={t3 - t2:6.3f}s total={t3 - t0:6.3f}s"
+        )
+
+        if samples.shape[1] / self.sample_rate > 7.4:
+            self.profile_encoder_once(samples, lengths)
 
         # NeMo example converts [B, C, T] -> [B, T, C]
         encoder_output = encoder_output.transpose(1, 2)

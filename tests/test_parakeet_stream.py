@@ -5,13 +5,16 @@ import torch
 
 from cltl.asr.parakeet_stream import LocalParakeetRNNTStreamer
 
+torch.set_num_threads(1)          # benchmark 1, 2, 4, 8, ...
+torch.set_num_interop_threads(1)
+
 streamer = LocalParakeetRNNTStreamer(
     model_name="nvidia/parakeet-tdt-0.6b-v3",
     device="cpu",
     compute_dtype=torch.float32,
-    chunk_secs=0.1,
-    left_context_secs=0.1,
-    right_context_secs=0.1,
+    chunk_secs=0.5,
+    left_context_secs=5.0,
+    right_context_secs=2.0,
 )
 
 audio, sr = sf.read("resources/mic_sample2.wav", dtype="float32")
@@ -28,6 +31,7 @@ start = time.time()
 for i in range(0, len(audio), packet):
     for result in streamer.push_audio(audio[i : i + packet]):
         print("PARTIAL:", result.text, round(i / sr, 2), round(time.time() - start, 2))
+
 
 final_result = streamer.finish()
 print("FINAL:", final_result.text)
