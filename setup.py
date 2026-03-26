@@ -6,6 +6,7 @@ with open("README.md", "r") as fh:
 with open("VERSION", "r") as fh:
     version = fh.read().strip()
 
+
 setup(
     name='cltl.asr',
     version=version,
@@ -38,6 +39,11 @@ setup(
             "soundfile",
             "google-cloud-speech"
         ],
+        "parakeet": [
+            "sounddevice",
+            "soundfile",
+            "nemo-toolkit[asr]",
+        ],
         "whisper": [
             "sounddevice",
             "soundfile",
@@ -62,4 +68,3 @@ setup(
         ]
     },
 )
-
