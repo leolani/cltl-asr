@@ -1,7 +1,6 @@
-import collections
 import copy
-from collections import deque
-from typing import List, Optional, Union, Iterable
+from dataclasses import dataclass
+from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -9,16 +8,19 @@ from nemo.collections.asr.models import ASRModel, EncDecHybridRNNTCTCModel, EncD
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
 from nemo.collections.asr.parts.utils.rnnt_utils import BatchedHyps
 from nemo.collections.asr.parts.utils.streaming_utils import ContextSize, StreamingBatchedAudioBuffer
-from torch.nn.functional import threshold
-
-from cltl.asr.api_streaming import BufferedASR, StreamTranscription
 
 
 def make_divisible_by(num: int, factor: int) -> int:
     return (num // factor) * factor
 
 
-class LocalParakeetRNNTStreamingASR(BufferedASR):
+@dataclass
+class StreamResult:
+    text: str
+    is_final: bool
+
+
+class LocalParakeetRNNTStreamer:
     """
     Local single-stream streaming ASR loop for Parakeet TDT / RNNT-style NeMo models.
 
@@ -40,7 +42,6 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         chunk_secs: float = 2.0,
         left_context_secs: float = 10.0,
         right_context_secs: float = 2.0,
-        turn_threshold_sec: float = 2.0,
     ):
         self.device = torch.device(device)
         self.compute_dtype = compute_dtype
@@ -115,45 +116,20 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             * self.features_frame2audio_samples,
         )
 
-        self.chunk_samples = int(chunk_secs * self.sample_rate)
-        self.left_context_samples = int(left_context_secs * self.sample_rate)
-        self.right_context_samples = int(right_context_secs * self.sample_rate)
-        self._turn_threshold_chunks = int(turn_threshold_sec // chunk_secs + 1)
-
         self.reset()
 
-    def reset(self, keep_recent: bool = False) -> None:
+    def reset(self) -> None:
         self.buffer = StreamingBatchedAudioBuffer(
             batch_size=1,
             context_samples=self.context_samples,
             dtype=torch.float32,
             device=self.device,
         )
-        self.pending_audio = torch.empty(0, dtype=torch.float32) if not keep_recent else self._collect_recent_audio()
-        # TODO Two parameters for threshold
-        self.partial_transcripts = deque([], maxlen=self._turn_threshold_chunks * 4)
+        self.pending_audio = torch.empty(0, dtype=torch.float32)
         self.current_batched_hyps: Optional[BatchedHyps] = None
         self.state = None
         self.started = False
         self.closed = False
-
-    def _collect_recent_audio(self) -> torch.Tensor:
-        """
-        Return the most recent raw audio we still have access to, combining:
-        - the current sliding buffer
-        - any not-yet-consumed pending audio
-        """
-        pieces = []
-
-        if self.buffer.samples is not None and self.buffer.samples.numel() > 0:
-            pieces.append(self.buffer.samples[0].detach().cpu())
-
-        if self.pending_audio.numel() > 0:
-            pieces.append(self.pending_audio.detach().cpu())
-
-        complete = torch.cat(pieces, dim=0) if pieces else torch.empty(0, dtype=torch.float32)
-
-        return complete[-self.context_samples.right:].clone()
 
     def _normalize_input(self, audio: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
         if isinstance(audio, np.ndarray):
@@ -185,7 +161,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         return self.model.tokenizer.ids_to_text(token_ids)
 
     @torch.inference_mode()
-    def _run_step(self, new_audio: torch.Tensor, is_final: bool) -> str:
+    def _run_step(self, new_audio: torch.Tensor, is_final: bool) -> StreamResult:
         """
         Adds one piece of new audio to the streaming buffer and runs one decode step.
 
@@ -248,24 +224,23 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         self.started = True
 
-        return self._decode_text()
+        return StreamResult(text=self._decode_text(), is_final=is_final)
 
-    def push_audio(self, audio_frames: Iterable[np.ndarray], sampling_rate: int = None) -> Iterable[StreamTranscription]:
+    def push_audio(self, audio: Union[np.ndarray, torch.Tensor]) -> List[StreamResult]:
         """
         Feed more mono audio samples. Returns zero or more partial results.
 
         The caller can feed arbitrary chunk sizes (e.g. 20 ms, 100 ms, 500 ms).
         Internally, decoding happens only when enough audio has accumulated.
-        :param **kwargs:
         """
         if self.closed:
             raise RuntimeError("Stream is already closed. Call reset() for a new stream.")
 
-        audio = self._normalize_input(self._concat_to_mono(audio_frames))
+        audio = self._normalize_input(audio)
         if audio.numel() > 0:
             self.pending_audio = torch.cat([self.pending_audio, audio], dim=0)
 
-        results: List[StreamTranscription] = []
+        results: List[StreamResult] = []
 
         while True:
             # Match the official script:
@@ -283,59 +258,30 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             step_audio = self.pending_audio[:needed]
             self.pending_audio = self.pending_audio[needed:]
 
-            current = self._run_step(step_audio, is_final=False)
-
-            # If current transcript is a full sentence, check against turn threshold,
-            # otherwise check against extended turn threshold
-            threshold_idx = None
-            if (len(self.partial_transcripts) >= self._turn_threshold_chunks and current.strip().endswith(".")):
-                threshold_idx = - self._turn_threshold_chunks
-            elif len(self.partial_transcripts) == self.partial_transcripts.maxlen:
-                threshold_idx = 0
-
-            if threshold_idx is not None and current == self.partial_transcripts[threshold_idx]:
-                results.append(StreamTranscription(current, is_final=True, start=0, end=1))
-                # self.partial_transcripts = deque([])
-                self.reset(keep_recent=True)
-            else:
-                self.partial_transcripts.append(current)
-
-        if len(self.partial_transcripts):
-            results.append(StreamTranscription(self.partial_transcripts[-1], is_final=False, start=0))
+            results.append(self._run_step(step_audio, is_final=False))
 
         return results
 
-    def finish(self) -> StreamTranscription:
+    def finish(self) -> StreamResult:
         """
         Flush the tail and close the stream.
         """
         if self.closed:
-            return StreamTranscription(text=self._decode_text(), is_final=True)
+            return StreamResult(text=self._decode_text(), is_final=True)
 
         self.closed = True
 
         # Case 1: no audio ever arrived
         if not self.started and self.pending_audio.numel() == 0:
-            return StreamTranscription(text="", is_final=True, start=0, end=0)
+            return StreamResult(text="", is_final=True)
 
         # Case 2: some tail remains -> flush it as final
         if self.pending_audio.numel() > 0:
             tail = self.pending_audio
             self.pending_audio = torch.empty(0, dtype=torch.float32)
-            return StreamTranscription(self._run_step(tail, is_final=True), is_final=True, start=0, end=1)
+            return self._run_step(tail, is_final=True)
 
         # Case 3: no tail remains, but buffered right-context still has to be promoted
         # into the final chunk. The NeMo buffer utilities support a zero-length final add.
         empty = torch.empty(0, dtype=torch.float32)
-        return StreamTranscription(self._run_step(empty, is_final=True), is_final=True, start=0, end=1)
-
-    def _concat_to_mono(self, audio_frames):
-        if not isinstance(audio_frames, collections.abc.Iterable):
-            audio = np.concatenate(tuple(audio_frames))
-        else:
-            audio = audio_frames
-
-        is_mono = audio.ndim == 1 or audio.shape[1] == 1
-        mono_audio = audio if is_mono else audio.mean(axis=1, dtype=np.int16).ravel()
-
-        return mono_audio
+        return self._run_step(empty, is_final=True)
