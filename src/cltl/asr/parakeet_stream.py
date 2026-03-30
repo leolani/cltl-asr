@@ -293,7 +293,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             elif len(self.partial_transcripts) == self.partial_transcripts.maxlen:
                 threshold_idx = 0
 
-            if threshold_idx is not None and current == self.partial_transcripts[threshold_idx]:
+            if threshold_idx is not None and current.strip() and current == self.partial_transcripts[threshold_idx]:
                 results.append(StreamTranscription(current, is_final=True, start=0, end=1))
                 # self.partial_transcripts = deque([])
                 self.reset(keep_recent=True)
