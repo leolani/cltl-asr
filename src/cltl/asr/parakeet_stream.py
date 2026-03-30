@@ -133,6 +133,11 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         self.started = False
         self.closed = False
 
+        self._last_encoder_output = None
+        self._last_encoder_output_len = None
+        self._last_encoder_context = None
+        self._last_encoder_context_batch = None
+
     def _collect_recent_audio(self) -> torch.Tensor:
         """
         Return the most recent raw audio we still have access to, combining:
@@ -181,6 +186,47 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         return self.model.tokenizer.ids_to_text(token_ids)
 
     @torch.inference_mode()
+    def _speculative_finish(self) -> str:
+        """Decode right-context frames speculatively without mutating stream state.
+
+        Reuses the encoder output cached by the most recent `_run_step` and
+        re-runs only the decoder with an extended `out_len` that includes the
+        right-context frames.  Decoder state is saved before and restored after,
+        so the stream can continue as if this call never happened.
+        """
+        if self._last_encoder_output is None:
+            return self._decode_text()
+
+        out_len = (self._last_encoder_output_len
+                   - self._last_encoder_context_batch.left)
+        if out_len.item() <= 0:
+            return self._decode_text()
+
+        # RNNT hidden states are contiguous; deepcopy safely clones all tensors.
+        saved_state = copy.deepcopy(self.state)
+        saved_hyps = copy.deepcopy(self.current_batched_hyps)
+
+        try:
+            encoder_output = self._last_encoder_output[:, self._last_encoder_context.left:]
+
+            chunk_batched_hyps, _, self.state = self.decoding_computer(
+                x=encoder_output,
+                out_len=out_len,
+                prev_batched_state=self.state,
+                multi_biasing_ids=None,
+            )
+
+            if self.current_batched_hyps is None:
+                self.current_batched_hyps = chunk_batched_hyps
+            else:
+                self.current_batched_hyps.merge_(chunk_batched_hyps)
+
+            return self._decode_text()
+        finally:
+            self.state = saved_state
+            self.current_batched_hyps = saved_hyps
+
+    @torch.inference_mode()
     def _run_step(self, new_audio: torch.Tensor, is_final: bool) -> str:
         """
         Adds one piece of new audio to the streaming buffer and runs one decode step.
@@ -221,8 +267,14 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             factor=self.encoder_frame2audio_samples
         )
 
+        # Cache pre-slice encoder output for speculative finish
+        self._last_encoder_output = encoder_output
+        self._last_encoder_output_len = encoder_output_len
+        self._last_encoder_context = encoder_context
+        self._last_encoder_context_batch = encoder_context_batch
+
         # Drop left context from encoder frames and decode only current chunk.
-        encoder_output = encoder_output[:, encoder_context.left:]
+        chunk_encoder_output = encoder_output[:, encoder_context.left:]
 
         out_len = torch.where(
             is_last_chunk_batch,
@@ -231,7 +283,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         )
 
         chunk_batched_hyps, _, self.state = self.decoding_computer(
-            x=encoder_output,
+            x=chunk_encoder_output,
             out_len=out_len,
             prev_batched_state=self.state,
             multi_biasing_ids=None,
@@ -252,7 +304,6 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         The caller can feed arbitrary chunk sizes (e.g. 20 ms, 100 ms, 500 ms).
         Internally, decoding happens only when enough audio has accumulated.
-        :param **kwargs:
         """
         if self.closed:
             raise RuntimeError("Stream is already closed. Call reset() for a new stream.")
@@ -285,17 +336,20 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
             current = self._run_step(step_audio, is_final=False)
 
-            # If current transcript is a full sentence, check against turn threshold,
-            # otherwise check against extended turn threshold
-            threshold_idx = None
-            if (len(self.partial_transcripts) >= self._turn_threshold_chunks and current.strip().endswith(".")):
-                threshold_idx = - self._turn_threshold_chunks
-            elif len(self.partial_transcripts) == self.partial_transcripts.maxlen:
-                threshold_idx = 0
-
-            if threshold_idx is not None and current.strip() and current == self.partial_transcripts[threshold_idx]:
+            # Speculative-finish-gated turn detection: when the chunk
+            # transcript ends in punctuation, speculatively decode the
+            # right-context frames to verify the sentence boundary is real.
+            if current.strip().endswith((".", "?", "!")):
+                speculative_text = self._speculative_finish()
+                if current.strip() == speculative_text.strip():
+                    results.append(StreamTranscription(speculative_text, is_final=True, start=0, end=1))
+                    self.reset(keep_recent=True)
+                else:
+                    self.partial_transcripts.append(current)
+            # Extended turn threshold for non-punctuation transcripts
+            elif (len(self.partial_transcripts) == self.partial_transcripts.maxlen
+                    and current.strip() and current == self.partial_transcripts[0]):
                 results.append(StreamTranscription(current, is_final=True, start=0, end=1))
-                # self.partial_transcripts = deque([])
                 self.reset(keep_recent=True)
             else:
                 self.partial_transcripts.append(current)
@@ -330,10 +384,10 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         return StreamTranscription(self._run_step(empty, is_final=True), is_final=True, start=0, end=1)
 
     def _concat_to_mono(self, audio_frames):
-        if not isinstance(audio_frames, collections.abc.Iterable):
-            audio = np.concatenate(tuple(audio_frames))
-        else:
+        if isinstance(audio_frames, np.ndarray):
             audio = audio_frames
+        else:
+            audio = np.concatenate(tuple(audio_frames))
 
         is_mono = audio.ndim == 1 or audio.shape[1] == 1
         mono_audio = audio if is_mono else audio.mean(axis=1, dtype=np.int16).ravel()
