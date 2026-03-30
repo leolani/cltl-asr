@@ -1,5 +1,6 @@
 import collections
 import copy
+import string
 from collections import deque
 from typing import List, Optional, Union, Iterable
 
@@ -36,10 +37,11 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         model_name: str = "nvidia/parakeet-tdt-0.6b-v3",
         device: str = "cpu",
         compute_dtype: torch.dtype = torch.float32,
-        chunk_secs: float = 2.0,
-        left_context_secs: float = 10.0,
+        chunk_secs: float = 0.5,
+        left_context_secs: float = 5.0,
         right_context_secs: float = 2.0,
-        turn_threshold_sec: float = 2.0,
+        turn_threshold_sec: float = 1.0,
+        vad=None,
     ):
         self.device = torch.device(device)
         self.compute_dtype = compute_dtype
@@ -116,6 +118,9 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         self._turn_threshold_chunks = int(turn_threshold_sec // chunk_secs + 1)
 
+        self._vad = vad
+        self._vad_silence_threshold = self.context_samples.right if vad else None
+
         self.reset()
 
     def reset(self, keep_recent: bool = False) -> None:
@@ -127,11 +132,12 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         )
         self.pending_audio = torch.empty(0, dtype=torch.float32) if not keep_recent else self._collect_recent_audio()
         # TODO Two parameters for threshold
-        self.partial_transcripts = deque([], maxlen=self._turn_threshold_chunks * 4)
+        self.partial_transcripts = deque([], maxlen=self._turn_threshold_chunks)
         self.current_batched_hyps: Optional[BatchedHyps] = None
         self.state = None
         self.started = False
         self.closed = False
+        self._consecutive_silence_samples = 0
 
         self._last_encoder_output = None
         self._last_encoder_output_len = None
@@ -183,6 +189,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             .cpu()
             .tolist()
         )
+
         return self.model.tokenizer.ids_to_text(token_ids)
 
     @torch.inference_mode()
@@ -197,8 +204,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         if self._last_encoder_output is None:
             return self._decode_text()
 
-        out_len = (self._last_encoder_output_len
-                   - self._last_encoder_context_batch.left)
+        out_len = (self._last_encoder_output_len - self._last_encoder_context_batch.left)
         if out_len.item() <= 0:
             return self._decode_text()
 
@@ -298,6 +304,24 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         return self._decode_text()
 
+    def _try_speculative_finalize(self, current: str, results: List[StreamTranscription]) -> bool:
+        """Speculatively decode right context; finalize if transcript is stable."""
+        speculative_text = self._speculative_finish()
+        print("XXX", current, speculative_text)
+
+        if current.strip().strip(string.punctuation) != speculative_text.strip().strip(string.punctuation):
+            return False
+
+        results.append(StreamTranscription(speculative_text.strip(), is_final=True, start=0, end=1))
+        self.reset(keep_recent=True)
+
+        return True
+
+    def _is_right_context_silent(self) -> bool:
+        """Check if consecutive silence has reached the right-context threshold."""
+        return (self._vad and self._vad_silence_threshold
+                and self._consecutive_silence_samples >= self._vad_silence_threshold)
+
     def push_audio(self, audio_frames: Iterable[np.ndarray], sampling_rate: int = None) -> Iterable[StreamTranscription]:
         """
         Feed more mono audio samples. Returns zero or more partial results.
@@ -308,14 +332,17 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         if self.closed:
             raise RuntimeError("Stream is already closed. Call reset() for a new stream.")
 
+        if sampling_rate and sampling_rate != self.sample_rate:
+            raise ValueError(f"Sampling rate {sampling_rate} is not supported (expected {self.sample_rate}).")
+
+        audio_frames = (audio_frames,) if isinstance(audio_frames, np.ndarray) else audio_frames
+
+        self._detect_silence(audio_frames)
         audio = self._normalize_input(self._concat_to_mono(audio_frames))
         if audio.numel() > 0:
             self.pending_audio = torch.cat([self.pending_audio, audio], dim=0)
 
-        results: List[StreamTranscription] = []
-
-        invoked = False
-
+        results = None
         while True:
             # Match the official script:
             # first decode step needs chunk + right_context,
@@ -329,35 +356,41 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             if self.pending_audio.numel() < needed:
                 break
 
-            invoked = True
+            results = []
 
             step_audio = self.pending_audio[:needed]
             self.pending_audio = self.pending_audio[needed:]
 
             current = self._run_step(step_audio, is_final=False)
 
-            # Speculative-finish-gated turn detection: when the chunk
-            # transcript ends in punctuation, speculatively decode the
-            # right-context frames to verify the sentence boundary is real.
-            if current.strip().endswith((".", "?", "!")):
-                speculative_text = self._speculative_finish()
-                if current.strip() == speculative_text.strip():
-                    results.append(StreamTranscription(speculative_text, is_final=True, start=0, end=1))
-                    self.reset(keep_recent=True)
-                else:
-                    self.partial_transcripts.append(current)
-            # Extended turn threshold for non-punctuation transcripts
+            finalized = False
+            if current.strip() and (
+                    current.strip().endswith((".", "?", "!"))
+                    or self._is_right_context_silent()):
+                finalized = self._try_speculative_finalize(current, results)
             elif (len(self.partial_transcripts) == self.partial_transcripts.maxlen
-                    and current.strip() and current == self.partial_transcripts[0]):
+                        and current.strip() and current == self.partial_transcripts[0]):
                 results.append(StreamTranscription(current, is_final=True, start=0, end=1))
-                self.reset(keep_recent=True)
-            else:
+                finalized = True
+
+            if not finalized:
                 self.partial_transcripts.append(current)
 
-        if invoked and len(self.partial_transcripts):
+        # Return intermediate results
+        if results is not None and len(self.partial_transcripts):
             results.append(StreamTranscription(self.partial_transcripts[-1], is_final=False, start=0))
 
-        return results
+        return results if results else []
+
+    def _detect_silence(self, audio_frames):
+        if self._vad is None:
+            return
+
+        for frame in audio_frames:
+            if self._vad.is_vad(frame, self.sample_rate):
+                self._consecutive_silence_samples = 0
+            else:
+                self._consecutive_silence_samples += frame.size
 
     def finish(self) -> StreamTranscription:
         """
@@ -384,12 +417,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         return StreamTranscription(self._run_step(empty, is_final=True), is_final=True, start=0, end=1)
 
     def _concat_to_mono(self, audio_frames):
-        if isinstance(audio_frames, np.ndarray):
-            audio = audio_frames
-        else:
-            audio = np.concatenate(tuple(audio_frames))
-
+        audio = np.concatenate(audio_frames)
         is_mono = audio.ndim == 1 or audio.shape[1] == 1
-        mono_audio = audio if is_mono else audio.mean(axis=1, dtype=np.int16).ravel()
 
-        return mono_audio
+        return audio if is_mono else audio.mean(axis=1).astype(np.int16).ravel()

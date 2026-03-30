@@ -29,10 +29,11 @@ start = time.time()
 for i in range(0, len(audio), packet):
     start_loop = time.time()
     transcripts = streamer.push_audio(audio[i: i + packet])
-    print("Transcripts:", len(transcripts))
-    for result in transcripts:
-        print("FINAL:" if result.is_final else "PARTIAL:", result.text,
-              round(i / sr, 2), round(time.time() - start, 2), round(time.time() - start_loop, 2))
+    if transcripts:
+        print("Transcripts:", len(transcripts))
+        for result in transcripts:
+            print("FINAL:" if result.is_final else "PARTIAL:", result.text,
+                  round(i / sr, 2), round(time.time() - start, 2), round(time.time() - start_loop, 2))
 
 final_result = streamer.finish()
 print("FINAL:", final_result.text)
