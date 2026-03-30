@@ -9,7 +9,6 @@ from nemo.collections.asr.models import ASRModel, EncDecHybridRNNTCTCModel, EncD
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
 from nemo.collections.asr.parts.utils.rnnt_utils import BatchedHyps
 from nemo.collections.asr.parts.utils.streaming_utils import ContextSize, StreamingBatchedAudioBuffer
-from torch.nn.functional import threshold
 
 from cltl.asr.api_streaming import BufferedASR, StreamTranscription
 
@@ -115,9 +114,6 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             * self.features_frame2audio_samples,
         )
 
-        self.chunk_samples = int(chunk_secs * self.sample_rate)
-        self.left_context_samples = int(left_context_secs * self.sample_rate)
-        self.right_context_samples = int(right_context_secs * self.sample_rate)
         self._turn_threshold_chunks = int(turn_threshold_sec // chunk_secs + 1)
 
         self.reset()
@@ -267,6 +263,8 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         results: List[StreamTranscription] = []
 
+        invoked = False
+
         while True:
             # Match the official script:
             # first decode step needs chunk + right_context,
@@ -279,6 +277,8 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
             if self.pending_audio.numel() < needed:
                 break
+
+            invoked = True
 
             step_audio = self.pending_audio[:needed]
             self.pending_audio = self.pending_audio[needed:]
@@ -300,7 +300,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             else:
                 self.partial_transcripts.append(current)
 
-        if len(self.partial_transcripts):
+        if invoked and len(self.partial_transcripts):
             results.append(StreamTranscription(self.partial_transcripts[-1], is_final=False, start=0))
 
         return results
@@ -310,7 +310,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         Flush the tail and close the stream.
         """
         if self.closed:
-            return StreamTranscription(text=self._decode_text(), is_final=True)
+            return StreamTranscription(text=self._decode_text(), is_final=True, start=0)
 
         self.closed = True
 
