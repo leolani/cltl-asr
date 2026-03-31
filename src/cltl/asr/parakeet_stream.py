@@ -30,6 +30,8 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
     - Input audio must be mono and already resampled to the model sample rate.
     - `push_audio()` returns zero or more partial hypotheses.
     - `finish()` flushes the tail and returns the final hypothesis.
+    - StreamTranscription.start and .end fields contain sample positions (not seconds)
+      in the input audio stream, enabling accurate timestamp tracking.
     """
 
     def __init__(
@@ -143,6 +145,18 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         self._last_encoder_output_len = None
         self._last_encoder_context = None
         self._last_encoder_context_batch = None
+
+        # Sample position tracking: maintain absolute positions across resets
+        # when keep_recent=True (turn boundaries), reset on full reset
+        if keep_recent:
+            # After finalization, next transcript starts from current position
+            if not hasattr(self, '_total_samples_consumed'):
+                self._total_samples_consumed = 0
+            self._current_transcript_start_sample = self._total_samples_consumed
+        else:
+            # Complete reset - new stream
+            self._total_samples_consumed = 0
+            self._current_transcript_start_sample = 0
 
     def _collect_recent_audio(self) -> torch.Tensor:
         """
@@ -312,7 +326,14 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         if current.strip().strip(string.punctuation) != speculative_text.strip().strip(string.punctuation):
             return False
 
-        results.append(StreamTranscription(speculative_text.strip(), is_final=True, start=0, end=1))
+        # Finalize with correct sample positions
+        # The speculative finish has decoded up to the current consumed position
+        results.append(StreamTranscription(
+            speculative_text.strip(),
+            is_final=True,
+            start=self._current_transcript_start_sample,
+            end=self._total_samples_consumed
+        ))
         self.reset(keep_recent=True)
 
         return True
@@ -358,8 +379,14 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
             results = []
 
+            # Track sample position before consuming audio
+            chunk_end_sample = self._total_samples_consumed + needed
+
             step_audio = self.pending_audio[:needed]
             self.pending_audio = self.pending_audio[needed:]
+
+            # Update sample position counter
+            self._total_samples_consumed += needed
 
             current = self._run_step(step_audio, is_final=False)
 
@@ -370,7 +397,13 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
                 finalized = self._try_speculative_finalize(current, results)
             elif (len(self.partial_transcripts) == self.partial_transcripts.maxlen
                         and current.strip() and current == self.partial_transcripts[0]):
-                results.append(StreamTranscription(current, is_final=True, start=0, end=1))
+                # Turn threshold reached - finalize transcript with correct sample positions
+                results.append(StreamTranscription(
+                    current,
+                    is_final=True,
+                    start=self._current_transcript_start_sample,
+                    end=self._total_samples_consumed
+                ))
                 finalized = True
 
             if not finalized:
@@ -378,7 +411,12 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         # Return intermediate results
         if results is not None and len(self.partial_transcripts):
-            results.append(StreamTranscription(self.partial_transcripts[-1], is_final=False, start=0))
+            # Partial transcript - only has start position, no end yet
+            results.append(StreamTranscription(
+                self.partial_transcripts[-1],
+                is_final=False,
+                start=self._current_transcript_start_sample
+            ))
 
         return results if results else []
 
@@ -397,7 +435,13 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         Flush the tail and close the stream.
         """
         if self.closed:
-            return StreamTranscription(text=self._decode_text(), is_final=True, start=0)
+            # Already closed, return current state
+            return StreamTranscription(
+                text=self._decode_text(),
+                is_final=True,
+                start=self._current_transcript_start_sample,
+                end=self._total_samples_consumed
+            )
 
         self.closed = True
 
@@ -408,13 +452,31 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         # Case 2: some tail remains -> flush it as final
         if self.pending_audio.numel() > 0:
             tail = self.pending_audio
+            tail_samples = tail.numel()
             self.pending_audio = torch.empty(0, dtype=torch.float32)
-            return StreamTranscription(self._run_step(tail, is_final=True), is_final=True, start=0, end=1)
+
+            # Process tail and update position
+            transcript_text = self._run_step(tail, is_final=True)
+            final_end = self._total_samples_consumed + tail_samples
+
+            return StreamTranscription(
+                transcript_text,
+                is_final=True,
+                start=self._current_transcript_start_sample,
+                end=final_end
+            )
 
         # Case 3: no tail remains, but buffered right-context still has to be promoted
         # into the final chunk. The NeMo buffer utilities support a zero-length final add.
         empty = torch.empty(0, dtype=torch.float32)
-        return StreamTranscription(self._run_step(empty, is_final=True), is_final=True, start=0, end=1)
+        transcript_text = self._run_step(empty, is_final=True)
+
+        return StreamTranscription(
+            transcript_text,
+            is_final=True,
+            start=self._current_transcript_start_sample,
+            end=self._total_samples_consumed
+        )
 
     def _concat_to_mono(self, audio_frames):
         audio = np.concatenate(audio_frames)
