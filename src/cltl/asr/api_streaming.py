@@ -46,6 +46,27 @@ class BufferedASR(abc.ABC):
         """
         raise NotImplementedError()
 
+    def get_current_sample_position(self) -> int:
+        """
+        Get the current sample position in the audio stream.
+
+        This represents the total number of samples that have been consumed
+        by the ASR since the stream started or was last fully reset. This
+        position is used for timestamp tracking and transcript filtering.
+
+        Returns
+        -------
+        int
+            Current sample position (number of samples consumed)
+
+        Notes
+        -----
+        The default implementation returns 0, which disables position-based
+        transcript filtering. Implementations should override this method
+        to provide accurate sample position tracking.
+        """
+        return 0
+
 
 class StreamingASR(abc.ABC):
     def speech_to_text(self,
@@ -92,3 +113,24 @@ class StreamingASR(abc.ABC):
             If no voice activity was detected within the specified timeout.
         """
         raise NotImplementedError()
+
+    def get_current_sample_position(self) -> int:
+        """
+        Get the current sample position in the audio stream.
+
+        This represents the total number of samples that have been consumed
+        by the ASR since the stream started or was last fully reset. This
+        position is used for timestamp tracking and transcript filtering.
+
+        Returns
+        -------
+        int
+            Current sample position (number of samples consumed)
+
+        Notes
+        -----
+        The default implementation returns 0, which disables position-based
+        transcript filtering. Implementations should override this method
+        to provide accurate sample position tracking.
+        """
+        return 0

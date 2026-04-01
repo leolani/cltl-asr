@@ -149,14 +149,22 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         # Sample position tracking: maintain absolute positions across resets
         # when keep_recent=True (turn boundaries), reset on full reset
         if keep_recent:
-            # After finalization, next transcript starts from current position
-            if not hasattr(self, '_total_samples_consumed'):
-                self._total_samples_consumed = 0
             self._current_transcript_start_sample = self._total_samples_consumed
         else:
-            # Complete reset - new stream
             self._total_samples_consumed = 0
             self._current_transcript_start_sample = 0
+
+    def get_current_sample_position(self) -> int:
+        """
+        Get the current sample position in the audio stream.
+
+        This represents the total number of samples that have been consumed
+        by the ASR since the stream started or was last fully reset.
+
+        Returns:
+            Current sample position (number of samples)
+        """
+        return self._total_samples_consumed
 
     def _collect_recent_audio(self) -> torch.Tensor:
         """

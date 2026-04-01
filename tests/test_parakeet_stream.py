@@ -32,7 +32,7 @@ for i in range(0, len(audio), packet):
     if transcripts:
         print("Transcripts:", len(transcripts))
         for result in transcripts:
-            print("FINAL:" if result.is_final else "PARTIAL:", result.text,
+            print("FINAL:" if result.is_final else "PARTIAL:", result.text, result.start, result.end,
                   round(i / sr, 2), round(time.time() - start, 2), round(time.time() - start_loop, 2))
 
 final_result = streamer.finish()
