@@ -150,11 +150,10 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         self._last_encoder_context = None
         self._last_encoder_context_batch = None
 
-        if keep_recent:
-            self._current_transcript_start_sample = self._total_samples_consumed
-        else:
+        self._transcript_onset_sample: Optional[int] = None
+
+        if not keep_recent:
             self._total_samples_consumed = 0
-            self._current_transcript_start_sample = 0
 
     def get_current_sample_position(self) -> int:
         """Return the total number of samples consumed since the last full reset."""
@@ -320,6 +319,14 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         return self._decode_text()
 
+    def _turn_start(self) -> int:
+        """Return the start sample of the current turn: onset of the first non-empty chunk."""
+        return self._transcript_onset_sample or self._total_samples_consumed
+
+    def _speech_end(self) -> int:
+        """Return the end sample of the current turn: end of the finalising chunk."""
+        return self._total_samples_consumed
+
     def _try_speculative_finalize(self, current: str, results: List[StreamTranscription]) -> bool:
         """Speculatively decode right context; finalize if transcript is stable."""
         speculative_text = self._speculative_finish()
@@ -332,8 +339,8 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         results.append(StreamTranscription(
             speculative_text.strip(),
             is_final=True,
-            start=self._current_transcript_start_sample,
-            end=self._total_samples_consumed,
+            start=self._turn_start(),
+            end=self._speech_end(),
         ))
         self.reset(keep_recent=True)
 
@@ -391,6 +398,13 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
             current = self._run_step(step_audio, is_final=False)
 
+            if current.strip() and self._transcript_onset_sample is None:
+                chunk_start = self._total_samples_consumed - needed
+                # The first step bundles right_context extra samples as lookahead;
+                # subtract them to align the onset with the actual chunk boundary.
+                right_context_prebuffered = needed - self.context_samples.chunk
+                self._transcript_onset_sample = chunk_start + right_context_prebuffered
+
             finalized = self._try_finalize(current, results)
             if not finalized:
                 self.partial_transcripts.append(current)
@@ -399,13 +413,20 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             results.append(StreamTranscription(
                 self.partial_transcripts[-1],
                 is_final=False,
-                start=self._current_transcript_start_sample,
+                start=self._turn_start(),
             ))
 
         return results
 
     def _try_finalize(self, current: str, results: List[StreamTranscription]) -> bool:
-        """Attempt to finalize the current transcript by one of two strategies."""
+        """Attempt to finalize the current transcript by one of two strategies.
+
+        Speculative finish is always tried first — it uses the right-context
+        lookahead to confirm the transcript is stable before committing.
+        The turn-threshold acts as a fallback: when the deque is full and the
+        transcript has not changed for that many chunks, we try speculative
+        finish once more and only force a final if it also agrees.
+        """
         if current.strip() and (
             current.strip().endswith((".", "?", "!")) or self._is_right_context_silent()
         ):
@@ -416,12 +437,21 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             and current.strip()
             and current == self.partial_transcripts[0]
         ):
+            # Use speculative finish to confirm before forcing a final, so we
+            # don't emit a truncated transcript when the sentence is still growing.
+            if self._try_speculative_finalize(current, results):
+                return True
+
+            # Speculative finish disagreed (sentence still changing): emit the
+            # current text as a forced final and reset so the deque doesn't keep
+            # re-firing on the same stale transcript.
             results.append(StreamTranscription(
                 current,
                 is_final=True,
-                start=self._current_transcript_start_sample,
-                end=self._total_samples_consumed,
+                start=self._turn_start(),
+                end=self._speech_end(),
             ))
+            self.reset(keep_recent=True)
             return True
 
         return False
@@ -442,7 +472,7 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             return StreamTranscription(
                 text=self._decode_text(),
                 is_final=True,
-                start=self._current_transcript_start_sample,
+                start=self._turn_start(),
                 end=self._total_samples_consumed,
             )
 
@@ -454,15 +484,20 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
         if self.pending_audio.numel() > 0:
             tail = self.pending_audio
             self.pending_audio = torch.empty(0, dtype=torch.float32)
+            onset = self._total_samples_consumed
             self._total_samples_consumed += tail.numel()
             transcript_text = self._run_step(tail, is_final=True)
         else:
             # No tail, but buffered right-context must be promoted into the final chunk.
+            onset = self._total_samples_consumed
             transcript_text = self._run_step(torch.empty(0, dtype=torch.float32), is_final=True)
+
+        if transcript_text.strip() and self._transcript_onset_sample is None:
+            self._transcript_onset_sample = onset
 
         return StreamTranscription(
             transcript_text,
             is_final=True,
-            start=self._current_transcript_start_sample,
+            start=self._turn_start(),
             end=self._total_samples_consumed,
         )
