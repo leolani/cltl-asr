@@ -358,21 +358,23 @@ def _make_asr(*, turn_threshold_chunks: int = 3, vad=None, vad_threshold: int = 
 
     buffer_mock = MagicMock()
     buffer_mock.samples = None  # _collect_recent_audio checks this
+    buffer_mock.context_size_batch.left = 0
     asr.buffer = buffer_mock
 
-    asr.pending_audio                    = torch.empty(0, dtype=torch.float32)
-    asr.partial_transcripts              = deque([], maxlen=turn_threshold_chunks)
-    asr.current_batched_hyps             = None
-    asr.state                            = None
-    asr.started                          = False
-    asr.closed                           = False
-    asr._consecutive_silence_samples     = 0
-    asr._last_encoder_output             = None
-    asr._last_encoder_output_len         = None
-    asr._last_encoder_context            = None
-    asr._last_encoder_context_batch      = None
-    asr._total_samples_consumed      = 0
-    asr._transcript_onset_sample     = None
+    asr.pending_audio                        = torch.empty(0, dtype=torch.float32)
+    asr.partial_transcripts                  = deque([], maxlen=turn_threshold_chunks)
+    asr.current_batched_hyps                 = None
+    asr.state                                = None
+    asr.started                              = False
+    asr.closed                               = False
+    asr._consecutive_silence_samples         = 0
+    asr._last_encoder_output                 = None
+    asr._last_encoder_output_len             = None
+    asr._last_encoder_context                = None
+    asr._last_encoder_context_batch          = None
+    asr._total_samples_consumed              = 0
+    asr._transcript_onset_sample             = None
+    asr._replay_offset                       = 0
 
     asr.model             = MagicMock()
     asr.decoding_computer = MagicMock()
@@ -516,11 +518,13 @@ class TestSamplePositionTracking(unittest.TestCase):
         asr = _make_asr()
         asr._total_samples_consumed  = 16_000
         asr._transcript_onset_sample = 8_000
+        asr._replay_offset           = 4_000
 
         with patch("cltl.asr.parakeet_stream.StreamingBatchedAudioBuffer"):
             asr.reset(keep_recent=False)
 
         self.assertEqual(asr._total_samples_consumed, 0)
+        self.assertEqual(asr._replay_offset, 0)
         self.assertIsNone(asr._transcript_onset_sample)
 
     def test_keep_recent_resets_onset_but_preserves_total(self):
@@ -536,43 +540,78 @@ class TestSamplePositionTracking(unittest.TestCase):
         self.assertEqual(asr._total_samples_consumed, 48_000)
         self.assertIsNone(asr._transcript_onset_sample)
 
-    def test_speech_end_returns_total_samples_consumed(self):
-        """_speech_end() returns the end of the finalising chunk."""
+    def test_keep_recent_accumulates_replay_offset(self):
+        """Each keep_recent reset adds the replayed sample count to _replay_offset."""
+        asr = _make_asr()
+        asr._total_samples_consumed = 80_000
+        recent = torch.empty(32_000, dtype=torch.float32)
+
+        with patch("cltl.asr.parakeet_stream.StreamingBatchedAudioBuffer"), \
+             patch.object(asr, "_collect_recent_audio", return_value=recent):
+            asr.reset(keep_recent=True)
+
+        self.assertEqual(asr._replay_offset, 32_000)
+        # get_current_sample_position corrects for the offset
+        self.assertEqual(asr.get_current_sample_position(), 80_000 - 32_000)
+
+    def test_speech_end_subtracts_right_context(self):
+        """_speech_end() returns total_consumed minus right-context (32_000)."""
         asr = _make_asr()
         asr._total_samples_consumed = 80_000
 
-        self.assertEqual(asr._speech_end(), 80_000)
+        self.assertEqual(asr._speech_end(), 80_000 - 32_000)
 
-    def test_turn_start_returns_onset_when_set(self):
-        """_turn_start() returns onset sample when the transcript has started."""
+    def test_turn_start_returns_onset_minus_right_context_when_set(self):
+        """_turn_start() returns onset minus right-context when onset is known."""
         asr = _make_asr()
-        asr._transcript_onset_sample = 24_000
-        asr._total_samples_consumed  = 48_000
+        asr._transcript_onset_sample = 56_000  # 56_000 - 32_000 = 24_000
+        asr._total_samples_consumed  = 80_000
 
-        self.assertEqual(asr._turn_start(), 24_000)
+        self.assertEqual(asr._turn_start(), 56_000 - 32_000)
 
-    def test_turn_start_falls_back_to_consumed_when_onset_not_set(self):
-        """_turn_start() falls back to total consumed if onset is not yet set."""
+    def test_turn_start_falls_back_to_consumed_minus_right_context_when_onset_not_set(self):
+        """_turn_start() uses total_consumed minus right-context as fallback."""
         asr = _make_asr()
         asr._transcript_onset_sample = None
-        asr._total_samples_consumed  = 48_000
+        asr._total_samples_consumed  = 80_000
 
-        self.assertEqual(asr._turn_start(), 48_000)
+        self.assertEqual(asr._turn_start(), 80_000 - 32_000)
 
-    def test_keep_recent_does_not_reset_total(self):
+    def test_keep_recent_preserves_raw_total_counter(self):
+        """keep_recent reset leaves _total_samples_consumed unchanged (replay offset corrects it)."""
         asr = _make_asr()
-        asr._total_samples_consumed = 32_000
+        asr._total_samples_consumed = 80_000
+        recent = torch.empty(32_000, dtype=torch.float32)
 
         with patch("cltl.asr.parakeet_stream.StreamingBatchedAudioBuffer"), \
-             patch.object(asr, "_collect_recent_audio", return_value=torch.empty(0)):
+             patch.object(asr, "_collect_recent_audio", return_value=recent):
             asr.reset(keep_recent=True)
 
-        self.assertEqual(asr._total_samples_consumed, 32_000)
+        self.assertEqual(asr._total_samples_consumed, 80_000)  # raw counter unchanged
+        self.assertEqual(asr._replay_offset, 32_000)           # offset tracks the overcount
 
     def test_onset_is_none_at_stream_start(self):
         """At stream start, onset is None (no transcript emitted yet)."""
         asr = _make_asr()
         self.assertIsNone(asr._transcript_onset_sample)
+
+    def test_turn_start_ignores_left_batch(self):
+        """_turn_start() subtracts only right_context; left_batch has no effect."""
+        asr = _make_asr()
+        asr._transcript_onset_sample = 56_000
+        asr._total_samples_consumed  = 80_000
+
+        # start = 56_000 - 32_000 = 24_000  (left_batch not subtracted)
+        self.assertEqual(asr._turn_start(), 56_000 - 32_000)
+
+    def test_speech_end_subtracts_only_right_context(self):
+        """_speech_end() subtracts only right_context; left_batch is not used."""
+        asr = _make_asr()
+        asr._total_samples_consumed = 80_000
+        asr.buffer.context_size_batch.left = 10_000  # must not affect the result
+
+        # end = 80_000 - 32_000 = 48_000
+        self.assertEqual(asr._speech_end(), 80_000 - 32_000)
 
 
 class TestSpeculativeTextComparison(unittest.TestCase):
@@ -599,8 +638,9 @@ class TestSpeculativeTextComparison(unittest.TestCase):
 
     def test_finalize_appends_result_and_returns_true_when_texts_match(self):
         asr = _make_asr()
-        asr._total_samples_consumed  = 48_000
-        asr._transcript_onset_sample = 8_000
+        # context_samples.right = 32_000 (set in _make_asr)
+        asr._total_samples_consumed  = 80_000
+        asr._transcript_onset_sample = 40_000  # stream start = 40_000 - 32_000 = 8_000
         asr._speculative_finish      = MagicMock(return_value="hello world.")
 
         results   = []
@@ -609,8 +649,9 @@ class TestSpeculativeTextComparison(unittest.TestCase):
         self.assertTrue(finalized)
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].is_final)
+        # start = onset - right_context = 40_000 - 32_000 = 8_000
         self.assertEqual(results[0].start, 8_000)
-        # end = total_consumed at finalisation
+        # end = total_consumed - right_context = 80_000 - 32_000 = 48_000
         self.assertEqual(results[0].end, 48_000)
 
     def test_finalize_returns_false_and_no_result_on_mismatch(self):

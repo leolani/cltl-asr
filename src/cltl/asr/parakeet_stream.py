@@ -154,10 +154,15 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         if not keep_recent:
             self._total_samples_consumed = 0
+            self._replay_offset = 0
+        else:
+            # pending_audio carries samples already counted in _total_samples_consumed.
+            # Track the overcount so stream-position calculations stay accurate.
+            self._replay_offset += recent_audio.numel()
 
     def get_current_sample_position(self) -> int:
         """Return the total number of samples consumed since the last full reset."""
-        return self._total_samples_consumed
+        return self._total_samples_consumed - self._replay_offset
 
     def _collect_recent_audio(self) -> torch.Tensor:
         """
@@ -319,13 +324,35 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
 
         return self._decode_text()
 
+    def _stream_position(self, consumed: int) -> int:
+        """Convert an internal consumed-sample count to a true stream position.
+
+        _total_samples_consumed inflates by the size of replayed audio on each
+        keep_recent reset; _replay_offset tracks that cumulative overcount.
+        """
+        return consumed - self._replay_offset
+
     def _turn_start(self) -> int:
-        """Return the start sample of the current turn: onset of the first non-empty chunk."""
-        return self._transcript_onset_sample or self._total_samples_consumed
+        """Return the start sample of the current turn.
+
+        _transcript_onset_sample is set to (_total_samples_consumed - chunk_samples) at the
+        step that first produces a non-empty transcript.  That value equals
+        chunk_start_in_stream + right_context (in the internal counter space), so
+        subtracting right_context and correcting for the replay offset recovers the
+        absolute stream position of the decoded chunk that first contained speech.
+        """
+        onset = self._transcript_onset_sample if self._transcript_onset_sample is not None \
+            else self._total_samples_consumed
+        return max(self._stream_position(onset) - self.context_samples.right, 0)
 
     def _speech_end(self) -> int:
-        """Return the end sample of the current turn: end of the finalising chunk."""
-        return self._total_samples_consumed
+        """Return the end sample of the current turn.
+
+        The decoder was running right_context samples ahead of the true speech position;
+        subtracting right_context (and correcting for replay offset) gives the stream
+        position of the last decoded audio.
+        """
+        return max(self._stream_position(self._total_samples_consumed) - self.context_samples.right, 0)
 
     def _try_speculative_finalize(self, current: str, results: List[StreamTranscription]) -> bool:
         """Speculatively decode right context; finalize if transcript is stable."""
@@ -399,11 +426,10 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             current = self._run_step(step_audio, is_final=False)
 
             if current.strip() and self._transcript_onset_sample is None:
-                chunk_start = self._total_samples_consumed - needed
-                # The first step bundles right_context extra samples as lookahead;
-                # subtract them to align the onset with the actual chunk boundary.
-                right_context_prebuffered = needed - self.context_samples.chunk
-                self._transcript_onset_sample = chunk_start + right_context_prebuffered
+                # Always encode chunk_start_in_stream + right_context so that
+                # _turn_start() can recover the stream position by subtracting right_context,
+                # regardless of whether this is the first step (needed = chunk + right) or not.
+                self._transcript_onset_sample = self._total_samples_consumed - self.context_samples.chunk
 
             finalized = self._try_finalize(current, results)
             if not finalized:
@@ -499,5 +525,5 @@ class LocalParakeetRNNTStreamingASR(BufferedASR):
             transcript_text,
             is_final=True,
             start=self._turn_start(),
-            end=self._total_samples_consumed,
+            end=self._speech_end(),
         )

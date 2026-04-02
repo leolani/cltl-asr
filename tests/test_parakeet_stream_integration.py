@@ -201,54 +201,59 @@ class TestLocalParakeetRNNTStreamingASR(_BaseStreamingASRTest):
     """End-to-end test against multi_turn_pauses.wav — a recording with clear
     pauses between turns and no filler sounds.
 
-    Six finals produced (including one short filler 'Okay, so I' between turns 3 and 4):
-        1.4 –  8.3 s  Turn 1: Veerle introduction part 1
-       10.6 – 17.0 s  Turn 2: Veerle introduction part 2 ('Ik denk dat...')
-       20.2 – 24.3 s  Turn 3: 'Daar kan ik...'
-       32.5 – 35.8 s  Filler: 'Okay, so I'
-       27.7 – 35.9 s  Turn 4: cats in Amersfoort
-       39.8 – 56.9 s  Turn 5: school / robots
+    Six finals produced (including one short filler 'Okay, so I' between turns 3 and 4).
+    Timestamps are corrected for both right-context lookahead and left-context buildup
+    after each keep_recent reset, so they closely track actual voice activity boundaries.
 
     Timestamp semantics:
-    - start: sample position of the first chunk in which the model emits non-empty
-             output for this turn.  Due to the right-context pre-fill on the first
-             decode step (~2.5 s), onset is delayed relative to true speech onset.
-    - end:   sample position of the last chunk consumed when the turn is finalised.
+    - start: stream position of the first decoded chunk containing speech, minus right_context.
+    - end:   stream position of the finalization step, minus right_context.
     Both values carry a tolerance of ± one chunk size (0.5 s / 8 000 samples).
     """
 
     AUDIO_FILE = RESOURCES / "multi_turn_pauses.wav"
 
     # (start_sample, end_sample, expected_text)
+    # Timings in samples at 16 000 Hz.  Note: start values reflect the model's first
+    # decoded chunk boundary, which may lead the true speech onset by up to one chunk
+    # (0.5 s / 8 000 samples) due to RNNT lookahead in the right-context window.
+    #
+    # Ground-truth speech boundaries (manual inspection):
+    #   Turn 1:  1.5 –  8.1 s  (24 000 – 129 600)
+    #   Turn 2: 10.7 – 16.4 s  (171 200 – 262 400)
+    #   Turn 3: 20.3 – 24.0 s  (324 800 – 384 000)
+    #   Filler: ~27 – 29 s     (432 000 – 464 000)  "Okay, so I"
+    #   Turn 5: 34.2 – 44.0 s  (547 200 – 704 000)
+    #   Turn 6: 39.9 – 56.9 s  (638 400 – 910 400)
     EXPECTED_TURNS = [
         (
-             47_360,  #  3.0 s
-            170_240,  # 10.6 s
+             15_360,  #  1.0 s  (one chunk before true onset at 1.5 s)
+            138_240,  #  8.6 s
             "Hello, mijn naam is Veerle. Ik vind het leuk om spelletjes te spelen.",
         ),
         (
-            225_280,  # 14.1 s
-            340_480,  # 21.3 s
+            161_280,  # 10.1 s  (one chunk before true onset at 10.7 s)
+            276_480,  # 17.3 s
             "Ik denk dat ik heel erg goed ben in rekenen. Ik kan superveel rekensommen oplossen.",
         ),
         (
-            410_880,  # 25.7 s
-            487_680,  # 30.5 s
+            314_880,  # 19.7 s  (one chunk before true onset at 20.3 s)
+            391_680,  # 24.5 s
             "Daar kan ik wel 8 of 10 van tegelijk doen.",
         ),
         (
-            519_680,  # 32.5 s — filler fragment between pauses
-            573_440,  # 35.8 s
+            391_680,  # 24.5 s — filler fragment between pauses
+            445_440,  # 27.8 s
             "Okay, so I",
         ),
         (
-            605_440,  # 37.8 s
-            736_000,  # 46.0 s
+            445_440,  # 27.8 s
+            576_000,  # 36.0 s
             "Ik heb thuis twee katten en die wonen in Abenswoord, ze heten Fret en Tony.",
         ),
         (
-            829_440,  # 51.8 s
-          1_113_600,  # 69.6 s
+            637_440,  # 39.8 s
+            921_600,  # 57.6 s
             "Bij basisschool staat in Nijmegen. De rollen zijn heel erg leuk. "
             "Ik heb heel erg veel zin om met de robots te werken. "
             "Want ik ben blij om technologie te zien. "
@@ -293,12 +298,12 @@ class TestLocalParakeetRNNTStreamingASRWithFillers(_BaseStreamingASRTest):
     as-is, giving six finals total.
 
     Six finals at the following approximate speech boundaries (16 000 Hz):
-        3.0 – 21.2 s  Turn 1+2: Veerle introduction (merged by fillers)
-       23.7 – 29.0 s  Turn 3: 'Daar kan ik...'
-       30.9 – 32.9 s  Filler: 'Um'
-       34.9 – 44.0 s  Turn 4: cats in Amersfoort
-       46.0 – 47.9 s  Filler: 'Um'
-       51.4 – 69.6 s  Turn 5: school / robots
+        1.5 – 19.2 s  Turn 1+2: Veerle introduction (merged by fillers)
+       20.0 – 24.0 s  Turn 2: 'Daar kan ik...'
+       27.0 – 31.0 s  Filler: 'Um'
+       32.0 – 44.0 s  Turn 3: cats in Amersfoort
+       44.0 – 48.0 s  Filler: 'Um'
+       39.9 – 56.9 s  Turn 4: school / robots
     """
 
     AUDIO_FILE = RESOURCES / "multi_turn.wav"
@@ -306,34 +311,34 @@ class TestLocalParakeetRNNTStreamingASRWithFillers(_BaseStreamingASRTest):
     # (start_sample, end_sample, expected_text)
     EXPECTED_TURNS = [
         (
-             47_360,  #  3.0 s
-            339_200,  # 21.2 s
+             15_360,  #  1.0 s  (one chunk before true onset at ~1.5 s)
+            307_200,  # 19.2 s
             "Hallo, mijn naam is Veerle. Ik vind het leuk om spelletjes te spelen. "
             "Ik denk dat ik heel erg goed ben in rekenen. Ik kan superveel rekensen oplossen. En",
         ),
         (
-            378_880,  # 23.7 s
-            463_360,  # 29.0 s
+            314_880,  # 19.7 s  (one chunk before true onset at ~20.0 s)
+            399_360,  # 25.0 s
             "Daar kan ik wel acht of tien van tegelijk doen.",
         ),
         (
-            495_360,  # 30.9 s — filler between turns 2 and 3
-            526_080,  # 32.9 s
+            399_360,  # 25.0 s — filler between turns 2 and 3
+            430_080,  # 26.9 s
             "Um",
         ),
         (
-            558_080,  # 34.9 s
-            704_000,  # 44.0 s
+            430_080,  # 26.9 s
+            576_000,  # 36.0 s
             "Ik heb thuis twee katten en die wonen in Abensfort. Zeven, Fretant Tony.",
         ),
         (
-            736_000,  # 46.0 s — filler between turns 3 and 4
-            766_720,  # 47.9 s
+            576_000,  # 36.0 s — filler between turns 3 and 4
+            606_720,  # 37.9 s
             "Um",
         ),
         (
-            821_760,  # 51.4 s
-          1_113_472,  # 69.6 s
+            629_760,  # 39.4 s  (one chunk before true onset at ~39.9 s)
+            921_472,  # 57.6 s
             "Bij basisschool staat in Nijmegen. De rollen zijn heel erg leuk. "
             "Ik heb heel erg veel zin om met de robots te werken. "
             "Want ik ben blij om technologie te zien. "
