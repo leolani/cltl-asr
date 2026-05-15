@@ -57,7 +57,13 @@ def main():
     application = ApplicationContainer()
 
     with application:
-        run_simple('0.0.0.0', 8000, DispatcherMiddleware(Flask(__name__)),
+        flask_app = Flask(__name__)
+
+        @flask_app.route('/health')
+        def health():
+            return 'OK', 200
+
+        run_simple('0.0.0.0', 8000, DispatcherMiddleware(flask_app),
                    threaded=True, use_reloader=False, use_debugger=False)
 
 
