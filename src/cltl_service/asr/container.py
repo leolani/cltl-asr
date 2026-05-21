@@ -31,8 +31,7 @@ class ASRContainer(InfraContainer):
             # @singleton cannot handle None
             return False
 
-        return AsrService.from_config(asr, self.emissor_data_client,
-                                      self.event_bus, self.resource_manager, self.config_manager)
+        return AsrService.from_config(asr, self.event_bus, self.resource_manager, self.config_manager)
 
     def _create_asr_implementation(self, implementation: str, sampling_rate: int):
         if implementation == "google":

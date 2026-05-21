@@ -11,7 +11,6 @@ from cltl.combot.infra.event import Event, EventBus
 from cltl.combot.infra.resource import ResourceManager
 from cltl.combot.infra.time_util import timestamp_now
 from cltl.combot.infra.topic_worker import TopicWorker
-from cltl_service.emissordata.client import EmissorDataClient
 from cltl_service.vad.schema import VadMentionEvent
 from emissor.representation.container import Index, TemporalRuler
 from emissor.representation.scenario import Modality, TextSignal
@@ -27,8 +26,8 @@ CONTENT_TYPE_SEPARATOR = ';'
 
 class AsrService:
     @classmethod
-    def from_config(cls, asr: ASR, emissor_data: EmissorDataClient,
-                    event_bus: EventBus, resource_manager: ResourceManager, config_manager: ConfigurationManager):
+    def from_config(cls, asr: ASR, event_bus: EventBus, resource_manager: ResourceManager,
+                    config_manager: ConfigurationManager):
         config = config_manager.get_config("cltl.asr")
         buffer = config.get_int("buffer") if "buffer" in config else 0
         gap_timeout = config.get_int("gap_timeout") / 1000 if "gap_timeout" in config else 0
@@ -37,10 +36,10 @@ class AsrService:
             return ClientAudioSource.from_config(config_manager, url, offset, length)
 
         return cls(config.get("vad_topic"), config.get("asr_topic"), asr, gap_timeout, buffer,
-                   emissor_data, audio_loader, event_bus, resource_manager)
+                   audio_loader, event_bus, resource_manager)
 
     def __init__(self, vad_topic: str, asr_topic: str, asr: ASR, gap_timeout: float, buffer: int,
-                 emissor_data: EmissorDataClient, audio_loader: Callable[[str, int, int], AudioSource],
+                 audio_loader: Callable[[str, int, int], AudioSource],
                  event_bus: EventBus, resource_manager: ResourceManager):
         """
         Service to create TextSignals from voice activity detections.
@@ -62,8 +61,6 @@ class AsrService:
             be dropped. Note: if a positive gap_timeout is used and buffer is set to 0, internally still a buffer will
             be created to ensure continuation events are not lost. Content of this buffer will be dropped if currently
             no continuation is expected and subsequent invocations of the process method are instantaneous.
-        emissor_data: EmissorDataClient
-            client to retrieve emissor data
         audio_loader: Callable[[str, int, int], AudioSource]
             Callable that provides an AudioSource to access raw audio referenced in VAD events
         event_bus: EventBus
@@ -72,7 +69,6 @@ class AsrService:
             ResourceManager of the application
         """
         self._asr = asr
-        self._emissor_data = emissor_data
         self._audio_loader = audio_loader
         self._event_bus = event_bus
         self._resource_manager = resource_manager
@@ -81,10 +77,9 @@ class AsrService:
 
         self._gap_timeout = gap_timeout
         self._buffer = buffer
-        self._transcript = []
-        self._mentions_transcript = []
-
-        self._last_event = timestamp_now()
+        self._transcripts = {}
+        self._mentions = {}
+        self._last_events = {}
 
         self._topic_worker = None
 
@@ -110,40 +105,62 @@ class AsrService:
         self._topic_worker = None
 
     def _process(self, event: Event[VadMentionEvent]):
+        if event is not None:
+            self._process_event(event)
+
+        self._flush_timed_out()
+
+    def _process_event(self, event: Event[VadMentionEvent]):
+        scenario_id = event.metadata.scenario_id
+
         if self._gap_timeout > 0 and self._buffer == 0:
             # Manually drop events that arrived during processing, but only if we don't expect continuation
             # We consider 10ms as instantaneous invocation
-            event_buffered_during_execution = timestamp_now() - self._last_event < 10
-            if event_buffered_during_execution and not self._transcript:
-                self._last_event = timestamp_now()
+            last = self._last_events.get(scenario_id, 0)
+            if timestamp_now() - last < 10 and not self._transcripts.get(scenario_id):
+                self._last_events[scenario_id] = timestamp_now()
                 return
 
-        transcript = None
-        if event is not None:
-            transcript = self._transcribe(event)
-            self._mentions_transcript.append(event.payload.mentions[0])
-            if transcript:
-                self._transcript.append(transcript)
+        transcript = self._transcribe(event)
+        self._mentions.setdefault(scenario_id, []).append(event.payload.mentions[0])
+        if transcript:
+            self._transcripts.setdefault(scenario_id, []).append(transcript)
 
-        if (event is None and not self._transcript) or (event is not None and transcript is None):
-            # Ignore scheduled invocations if there is no transcript waiting for continuation and empty VAD detections
+        transcripts = self._transcripts.get(scenario_id, [])
+
+        if transcript is None:
+            # Empty VAD detection — nothing to do for this scenario
             pass
-        elif self._transcript and transcript == "":
-            logger.debug("Ignore empty transcript while waiting for continuation of %s (%s)", self._transcript[-1], event.id)
-        elif self._gap_timeout and event is not None and self._transcript and self._transcript[-1].endswith(ASR.GAP_INDICATOR):
-            # Ignore empty transcripts while waiting for continuation
-            logger.debug("Partially transcribed event %s to %s", event.id, self._transcript[-1])
-        else:
-            # Full (potentially empty) utterance or gap timeout reached
-            asr_event = self._create_payload()
-            self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event, source=event))
-            logger.info("Transcribed event %s to %s %s", event.id, asr_event.signal.text,
-                        f"({self._transcript})" if len(self._transcript) > 1 else "")
+        elif transcripts and transcript == "":
+            logger.debug("Ignore empty transcript while waiting for continuation of %s (%s)", transcripts[-1], event.id)
+        elif self._gap_timeout and transcripts and transcripts[-1].endswith(ASR.GAP_INDICATOR):
+            # Partial utterance — wait for continuation
+            logger.debug("Partially transcribed event %s to %s", event.id, transcripts[-1])
+        elif transcripts:
+            # Full utterance ready — flush cleans up last_events for this scenario
+            self._flush(scenario_id, source=event)
+            return
 
-            self._transcript = []
-            self._mentions_transcript = []
+        self._last_events[scenario_id] = timestamp_now()
 
-        self._last_event = timestamp_now()
+    def _flush_timed_out(self):
+        if not self._gap_timeout:
+            return
+        now = timestamp_now()
+        for scenario_id in list(self._transcripts.keys()):
+            # gap_timeout is in seconds; last_events timestamps are in milliseconds
+            if now - self._last_events.get(scenario_id, 0) >= self._gap_timeout * 1000:
+                self._flush(scenario_id, source=None)
+
+    def _flush(self, scenario_id: str, source):
+        parts = self._transcripts[scenario_id]
+        asr_event = self._create_payload(scenario_id)
+        self._event_bus.publish(self._asr_topic, Event.for_payload(asr_event, source=source))
+        logger.info("Transcribed scenario %s to %s %s", scenario_id, asr_event.signal.text,
+                    f"({parts})" if len(parts) > 1 else "")
+        del self._transcripts[scenario_id]
+        del self._mentions[scenario_id]
+        self._last_events.pop(scenario_id, None)
 
     def _transcribe(self, event: Event[VadMentionEvent]):
         payload = event.payload
@@ -163,11 +180,10 @@ class AsrService:
         with self._audio_loader(url, segment.start, segment.stop - segment.start) as source:
             return self._asr.speech_to_text(np.concatenate(tuple(source.audio)), source.rate)
 
-    def _create_payload(self):
-        scenario_id = self._emissor_data.get_scenario_for_id(self._mentions_transcript[0].id)
+    def _create_payload(self, scenario_id: str):
         signal_id = str(uuid.uuid4())
-        transcript = " ".join(self._strip(part) for part in self._transcript)
-        segments = [segment for mention in self._mentions_transcript for segment in mention.segment]
+        transcript = " ".join(self._strip(part) for part in self._transcripts[scenario_id])
+        segments = [segment for mention in self._mentions[scenario_id] for segment in mention.segment]
 
         signal = TextSignal(signal_id, Index.from_range(signal_id, 0, len(transcript)), list(transcript), Modality.TEXT,
                             TemporalRuler(scenario_id, timestamp_now(), timestamp_now()), [], [], transcript)

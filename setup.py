@@ -54,11 +54,9 @@ setup(
         ],
         "service": [
             "cltl.backend[impl]",
-            "cltl.emissor-data[client]",
             "cltl.combot",
             "cltl.vad",
             "emissor",
-            "requests",
         ]
     },
 )

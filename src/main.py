@@ -7,7 +7,6 @@ from cltl.combot.infra.di_container import singleton
 from cltl.combot.infra.event.api import Event, PAYLOAD
 from cltl.combot.infra.event.memory import SynchronousEventBus
 from cltl_service.asr.container import ASRContainer
-from cltl_service.emissordata.container import EmissorStorageContainer
 from emissor.representation.util import marshal, unmarshal, register_type_var
 from flask import Flask
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
@@ -30,13 +29,7 @@ def deserializer(obj):
     return unmarshal(obj, cls=Event)
 
 
-class ApplicationContainer(ASRContainer, EmissorStorageContainer):
-    """ASR service with bundled emissor storage.
-
-    EmissorStorageContainer provides emissor_data_client which ASRContainer depends on.
-    In a fully distributed deployment, EmissorStorageContainer can be removed here and
-    the emissor service can run as a separate container.
-    """
+class ApplicationContainer(ASRContainer):
 
     @property
     @singleton
