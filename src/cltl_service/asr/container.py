@@ -28,7 +28,8 @@ class ASRContainer(InfraContainer):
 
         if asr is None:
             logger.warning("No ASR implementation configured")
-            return None
+            # @singleton cannot handle None
+            return False
 
         return AsrService.from_config(asr, self.emissor_data_client,
                                       self.event_bus, self.resource_manager, self.config_manager)
