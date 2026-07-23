@@ -10,10 +10,10 @@ LABEL org.opencontainers.image.licenses="MIT"
 COPY --from=leolani . /leolani/
 
 WORKDIR /cltl-asr
-COPY setup.py requirements.txt README.md VERSION ./
+COPY setup.py requirements.docker.txt README.md VERSION ./
 COPY src ./src
 
-RUN pip install --no-index --no-build-isolation --find-links=/leolani -r requirements.txt && \
+RUN pip install --no-index --no-build-isolation --find-links=/leolani -r requirements.docker.txt && \
     rm -rf /leolani && \
     find /usr/local/lib/python3.10 -type d -name __pycache__ -exec rm -rf {} +
 

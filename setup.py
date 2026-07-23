@@ -26,7 +26,6 @@ setup(
             "cffi",
             "importlib_resources",
             "jiwer",
-            "sounddevice",
             "soundfile",
             "torch",
             "transformers",
@@ -34,21 +33,17 @@ setup(
             "cltl.combot"
         ],
         "google": [
-            "sounddevice",
             "soundfile",
             "google-cloud-speech"
         ],
         "whisper": [
-            "sounddevice",
             "soundfile",
             "openai-whisper"
         ],
         "whispercpp": [
-            "sounddevice",
             "soundfile",
         ],
         "whisperapi": [
-            "sounddevice",
             "soundfile",
             "openai",
         ],
@@ -57,6 +52,9 @@ setup(
             "cltl.combot",
             "cltl.vad",
             "emissor",
+        ],
+        "testing": [
+            "sounddevice"
         ]
     },
 )
